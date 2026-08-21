@@ -1,0 +1,32 @@
+# EditorConfig for Provenance — a Go service.
+# UTF-8, LF, final newline, no trailing whitespace everywhere; per-language indent below.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Go is gofmt-formatted: hard tabs, tab width 4 by convention.
+[*.go]
+indent_style = tab
+indent_size = 4
+
+# go.mod / go.sum use tabs.
+[go.{mod,sum}]
+indent_style = tab
+
+# Web / config sources (yaml, json).
+[*.{json,yml,yaml}]
+indent_size = 2
+
+# Markdown — preserve authored wrapping and hard line breaks (two trailing spaces).
+[*.md]
+trim_trailing_whitespace = false
+
+# Make recipes require literal tabs.
+[{Makefile,*.mk}]
+indent_style = tab

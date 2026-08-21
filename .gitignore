@@ -1,0 +1,116 @@
+# ---- Build output ----
+build/
+build-*/
+cmake-build-*/
+out/
+dist/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+Testing/
+
+# ---- Local scratch work ----
+scratchpad/
+
+# ---- Compiled objects / libraries / binaries ----
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.ko
+*.elf
+*.bc
+*.d
+
+# Debug info
+*.dSYM/
+*.su
+*.idb
+*.pdb
+*.ilk
+
+# ---- Coverage / profiling / sanitizers ----
+*.gcno
+*.gcda
+*.gcov
+*.profraw
+*.profdata
+coverage/
+lcov.info
+*.lcov
+perf.data
+perf.data.old
+callgrind.out.*
+massif.out.*
+
+# ---- Fuzzing ----
+crash-*
+leak-*
+timeout-*
+oom-*
+fuzz-*.log
+
+# ---- Docs generation ----
+docs/html/
+docs/latex/
+docs/xml/
+doxygen_warnings.log
+
+# ---- Logs / temp files ----
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*~
+.cache/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# ---- Editors / IDEs ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.clangd/
+.ccls-cache/
+
+# ---- OS ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# ---- Secrets / local env ----
+.env
+.env.local
+*.pem
+*.key
