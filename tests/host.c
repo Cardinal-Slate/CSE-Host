@@ -9,13 +9,13 @@
 static int fails = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL %s\n", (m)); fails++; } } while (0)
 
-/* a program body: the fold-VM leaf "push N" — one instruction [op=PUSH, nbytes=1, N] */
+/* a program body: a lone value leaf — its reading is the number itself, big-endian (n < 256 here) */
 static unsigned char pbuf[8][8];
 static slate_psda pnodes[8];
 static int pn = 0;
-static slate_psda *push(unsigned n) {
-  unsigned char raw[3] = { 0, 1, (unsigned char)n };
-  slate_encode(raw, 3, pbuf[pn]);
+static slate_psda *value(unsigned n) {
+  unsigned char raw[1] = { (unsigned char)n };
+  slate_encode(raw, 1, pbuf[pn]);
   pnodes[pn].potential = pbuf[pn]; pnodes[pn].prev = 0; pnodes[pn].next = 0;
   return &pnodes[pn++];
 }
@@ -27,8 +27,8 @@ static unsigned long val(slate_reading r) {
 
 int main(void) {
   /* emit two programs: A computes 20 and tails to B; B computes 13, no tail */
-  slate_psda *B = cse_host_emit(push(13), 0);
-  slate_psda *A = cse_host_emit(push(20), B);
+  slate_psda *B = cse_host_emit(value(13), 0);
+  slate_psda *A = cse_host_emit(value(20), B);
 
   CHECK(cse_host_tail(A) == B, "A's tail is B");
   CHECK(cse_host_tail(B) == 0, "B has no tail");
