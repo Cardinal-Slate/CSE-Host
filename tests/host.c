@@ -1,46 +1,47 @@
-/* tests/host.c — one program tails into another, and the trampoline drives both to results.
-   SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* tests/host.c — the driver runs a small program to a fixed point. The step is supplied here (the driver
+   is generic); a program encodes (n, acc), the step folds n into acc and counts down, and the host drives
+   it until n hits 0 — computing 1+2+…+5 = 15. SPDX-License-Identifier: MIT OR Apache-2.0 */
 #include <stdio.h>
 #include "cse/host.h"
-#include "cse/dsa/cell.h"
 #include "slate/psda.h"
 #include "slate/encode.h"
 
 static int fails = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL %s\n", (m)); fails++; } } while (0)
 
-/* a program body: a lone value leaf — its reading is the number itself, big-endian (n < 256 here) */
-static unsigned char pbuf[8][8];
-static slate_psda pnodes[8];
+/* a program is a psda whose potential encodes two small non-negative bytes: (n, acc) */
+static unsigned char pbuf[64][4];
+static slate_psda pnodes[64];
 static int pn = 0;
-static slate_psda *value(unsigned n) {
-  unsigned char raw[1] = { (unsigned char)n };
-  slate_encode(raw, 1, pbuf[pn]);
+static slate_psda *mk(int n, int acc) {
+  unsigned char raw[2] = { (unsigned char)n, (unsigned char)acc };
+  slate_encode(raw, 2, pbuf[pn]);
   pnodes[pn].potential = pbuf[pn]; pnodes[pn].prev = 0; pnodes[pn].next = 0;
   return &pnodes[pn++];
 }
-static unsigned long val(slate_reading r) {
-  unsigned char b[16]; size_t k = slate_decode(r, b, sizeof b), i; unsigned long v = 0;
-  for (i = 0; i < k; i++) v = (v << 8) | b[i];
-  return v;
+static void get(slate_psda *p, int *n, int *acc) {
+  unsigned char raw[4]; slate_decode(p->potential, raw, sizeof raw);
+  *n = raw[0]; *acc = raw[1];
+}
+
+/* the step: fold n into acc, decrement n; done (return 0) when n reaches 0 */
+static slate_psda *sum_step(slate_psda **pool, slate_psda *prog) {
+  int n, acc; (void)pool;
+  get(prog, &n, &acc);
+  if (n <= 0) return 0;
+  return mk(n - 1, acc + n);
 }
 
 int main(void) {
-  /* emit two programs: A computes 20 and tails to B; B computes 13, no tail */
-  slate_psda *B = cse_host_emit(value(13), 0);
-  slate_psda *A = cse_host_emit(value(20), B);
+  slate_psda *pool = 0;   /* this step allocates from its own static table, so no pool is needed */
 
-  CHECK(cse_host_tail(A) == B, "A's tail is B");
-  CHECK(cse_host_tail(B) == 0, "B has no tail");
+  slate_psda *result = cse_host(sum_step, &pool, mk(5, 0));
+  int n, acc; get(result, &n, &acc);
 
-  /* the trampoline drives A → B, collecting the values in order */
-  slate_psda *out = cse_host(A);
+  CHECK(n == 0, "host drove the program to its fixed point (n = 0)");
+  CHECK(acc == 15, "host summed 1..5 = 15 by iterating the step");
 
-  CHECK(out != 0, "host produced results");
-  CHECK(val(cse_cell_payload(out)->potential) == 20, "program A ran → 20");
-  CHECK(cse_cell_rest(out) != 0 && val(cse_cell_payload(cse_cell_rest(out))->potential) == 13,
-        "the tail ran: program B → 13");
-
+  if (!fails) printf("  host: drove (5,0) → (0,15) — 1+2+3+4+5 = 15\n");
   printf(fails ? "host: FAIL\n" : "host: ok\n");
   return fails ? 1 : 0;
 }

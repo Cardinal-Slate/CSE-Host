@@ -1,23 +1,13 @@
-/// cse/host.h — the self-hosting runtime: run a program, follow its tail. Opaque.
-/// SPDX-License-Identifier: MIT OR Apache-2.0
-///
-/// A program is a structure — a body (a leaf the floor runs) and a tail (the program that runs next).
-/// These are the emit / run / tail effects made opaque: psda in, psda out, no byte carrier rebuilt
-/// between hops. `cse_host` is the trampoline — run each program's body, hand off to its tail, collect
-/// the results in order. Because a program's tail is its own next, the trampoline is just the shared
-/// walk (cse_map), so finite programs compose over time with no stack and no growing graph. Only slate
-/// measurements cross; a program never touches a byte — that stays in the floor provider, below the seam.
+/// cse/host.h — the execution driver (the trampoline). It iterates a step over a program (a psda) until
+/// the step signals a fixed point, and returns the result. The step is passed in opaquely — the driver
+/// knows nothing about what it is driving, only that programs are psda. This is what makes it
+/// self-hosting: the runtime is a slate loop over slate values, not foreign machinery. Depends on the
+/// spine only. SPDX-License-Identifier: MIT OR Apache-2.0
 #pragma once
 #include "slate/psda.h"
 
-/// EMIT — make a program from a `body` (a leaf the floor runs) and a `tail` (the next program, or 0).
-slate_psda *cse_host_emit(slate_psda *body, slate_psda *tail);
+/// one step of a program: given the pool and the current program, return the next program, or 0 = done.
+typedef slate_psda *(*cse_step)(slate_psda **pool, slate_psda *prog);
 
-/// RUN — run one program's body through the floor; returns the value it computes.
-slate_psda *cse_host_run(slate_psda *prog);
-
-/// TAIL — the program this one hands off to, or nothing.
-slate_psda *cse_host_tail(slate_psda *prog);
-
-/// HOST — the trampoline: run `seed`, follow each tail, collect the values in order.
-slate_psda *cse_host(slate_psda *seed);
+/// drive `seed` to its fixed point: apply `step` until it returns 0, then return the last program.
+slate_psda *cse_host(cse_step step, slate_psda **pool, slate_psda *seed);
