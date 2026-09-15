@@ -22,3 +22,7 @@ Paths are the same as in the umbrella's merged view, so this repo drops into it 
 ## Provenance
 
 Extracted from [CSE-Core](https://github.com/Cardinal-Slate/CSE-Core) at `6d3be1b` (plus the codec lift into `slate/codec.hpp`).
+
+## Crossing includes
+
+None.
