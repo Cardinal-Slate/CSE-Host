@@ -1,8 +1,7 @@
 # Changelog
 
-## [Unreleased]
+Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
-- Initial cut: the self-hosting trampoline over psda programs.
-- `cse_host_emit` composes a program (a body + a tail); `cse_host_run` runs a body through the floor;
-  `cse_host_tail` is the hand-off; `cse_host` is the trampoline — the shared walk (`cse_map`) running each
-  program along the tail chain. Opaque, slate-only.
+## 0.1.0
+
+Extracted from CSE-Core `6d3be1b`: The C ABI and the composition root. Paths unchanged; gates carried with the code.
