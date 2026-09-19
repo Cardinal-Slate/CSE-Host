@@ -2,6 +2,10 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.2.1
+
+- `tests/unit/abi_embed.c`: the blocks whose subject is the row install a store; the rest do not. A check that
+  the host was reached is a claim about work, and a granted ask whose row is there is served from it.
 ## 0.2.0
 
 - **The C ABI is two bands.** `include/slate/slate.h` (the user band: a record from binaries, run, the receipt and

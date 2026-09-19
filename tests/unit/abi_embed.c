@@ -5,7 +5,11 @@
  * host; an effect's result is a row — the same request in another builder over the same store is served without
  * the host; the deadline gate aborts an effect to a clean refusal; async hosts park fibers, not threads — tasks
  * spawned in a scope overlap their waits and each reads its own value; the search over a graph measures by shape
- * and aggregates by computation. */
+ * and aggregates by computation.
+ *
+ * A check whose claim is that the host was reached is a claim about work, and work only happens on a miss: a
+ * granted ask whose row is already there is served from it, host untouched, by design. The gate is run from
+ * empty memory (the harness clears the store before the run), so a miss is a miss. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,7 +131,7 @@ int main(void) {
   /* ---- 4. fibers: four tasks with async hosts overlap their waits on one scope; each reads its own value ---- */
   {
     Task ts[4]; const char *blobs[4] = { "a", "b", "c", "d" };
-    for (int i = 0; i < 4; i++) { ts[i].host.begins = 0; ts[i].host.reply = 100 + i; ts[i].host.ms = 30; ts[i].got = 0; ts[i].rc = -1; ts[i].blob = blobs[i]; }
+    for (int i = 0; i < 4; i++) { memset(&ts[i], 0, sizeof ts[i]); ts[i].host.reply = 100 + i; ts[i].host.ms = 30; ts[i].rc = -1; ts[i].blob = blobs[i]; }
     slate_scope_run(scope_body, ts);
     for (int i = 0; i < 4; i++) CHECK(ts[i].rc == 0 && ts[i].got == 101 + i && ts[i].host.begins == 1, "4: task %d rc %d got %lld begins %d", i, ts[i].rc, (long long)ts[i].got, ts[i].host.begins);
     printf("  fibers: four tasks parked on async effects in one scope, each woke with its own value\n");
