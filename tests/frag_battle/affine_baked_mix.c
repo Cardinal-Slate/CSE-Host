@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* ---- growable memory sink + cursor source over the same bytes ---- */
@@ -52,8 +52,8 @@ static MemSink build_and_save(void) {
   int32_t root   = slate_dag_add(b, scaled, slate_dag_load(b, cidOff, p));
   MemSink out = {0};
   uint32_t holes[1] = {cidA};                          /* only A is a hole; the offset table bakes */
-  int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "save_fragment (A hole, OFFSET baked) returns OK");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
+  CHECK(rc == NULL, "save_fragment (A hole, OFFSET baked) returns OK");
   slate_dag_free(b);
   return out;
 }
@@ -66,14 +66,14 @@ static int splice_run(const MemSink *frag, const int64_t A[N], int64_t out[N]) {
   SlateDag *b = slate_dag_new();
   uint32_t cidA = slate_dag_carrier(b, A, N);          /* only A supplied; the offset must come from the bake */
   uint32_t args[1] = {cidA};
-  int32_t root = slate_dag_splice(b, f, args, 1);
+  int32_t root = -1; slate_dag_splice(b, f, args, 1, &root);
   int rc = -2000;
   if (root >= 0) {
     int64_t dims[1] = {N};
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     if (a) {
       int64_t num[N], den[N];
-      if (slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_OK) {
+      if (slate_array_i64_unsafe(a, num, den) == NULL) {
         int ok = 1;
         for (int i = 0; i < N; i++) { if (den[i] != 1) ok = 0; out[i] = num[i]; }
         rc = ok ? 0 : -3000;
@@ -100,8 +100,8 @@ int main(void) {
     CHECK(f != NULL, "frag_load ok");
     if (f) {
       uint32_t np = 0, nh = 0;
-      int rc = slate_frag_iface(f, &np, NULL, &nh, NULL);
-      CHECK(rc == SLATE_BATCH_OK, "iface ok");
+      const char *rc = slate_frag_iface(f, &np, NULL, &nh, NULL);
+      CHECK(rc == NULL, "iface ok");
       CHECK(np == 1, "iface nparams == 1");
       CHECK(nh == 1, "iface nholes == 1 (only A; OFFSET baked, not a hole)");
       slate_frag_free(f);
@@ -146,8 +146,8 @@ int main(void) {
     int32_t root = slate_dag_load(b, cidQ, p);
     MemSink out = {0};
     /* nholes = 0: Qc is read by root but not a hole, so save must try to bake it. */
-    int rc = slate_dag_save_fragment(b, root, /*holes=*/NULL, 0, mem_sink, &out);
-    CHECK(rc == SLATE_BATCH_EARGS, "save_fragment refuses to BAKE a rational carrier with EARGS");
+    const char *rc = slate_dag_save_fragment(b, root, /*holes=*/NULL, 0, mem_sink, &out);
+    CHECK(slate_refused(rc, "args"), "save_fragment refuses to BAKE a rational carrier with EARGS");
     CHECK(out.len == 0, "no bytes emitted on the refused bake");
     free(out.buf);
     slate_dag_free(b);
@@ -163,10 +163,10 @@ int main(void) {
     int32_t root = slate_dag_load(b, cidQ, p);
     MemSink out = {0};
     uint32_t holes[1] = {cidQ};                          /* Qc as a hole, not baked */
-    int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
-    CHECK(rc == SLATE_BATCH_OK, "save_fragment ACCEPTS a rational carrier as a HOLE (Q hole ok)");
+    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
+    CHECK(rc == NULL, "save_fragment ACCEPTS a rational carrier as a HOLE (Q hole ok)");
     /* the hole's receipt should read Q. */
-    if (rc == SLATE_BATCH_OK && out.len > 0) {
+    if (rc == NULL && out.len > 0) {
       MemSrc src = {out.buf, out.len, 0};
       SlateFrag *f = slate_frag_load(mem_src, &src);
       CHECK(f != NULL, "Q-hole fragment loads back");
@@ -175,7 +175,7 @@ int main(void) {
         slate_frag_iface(f, &np, NULL, &nh, NULL);
         CHECK(nh == 1, "Q-hole fragment reports 1 hole");
         slate_frag_iface(f, NULL, &hole, &cap, NULL);
-        CHECK(hole.receipt.domain == 2 /* ℚ */, "the hole's declared domain is Q (rational)");
+        CHECK(strcmp(hole.receipt.domain, "Q") == 0, "the hole's declared domain is Q (rational)");
         slate_frag_free(f);
       }
     }

@@ -6,13 +6,13 @@
  * 2. Splice a real Q carrier and run; read the exact 9/4 via slate_array_records (bignum record path).
  * 3. Typecheck direction:
  *    - a plain int (Z) carrier spliced into that Q hole is allowed (Z ⊂ Q); result is an exact integer.
- *    - a Q carrier spliced into a Z hole must refuse with -SLATE_BATCH_EREFUSED (Q ⊄ Z).
+ *    - a Q carrier spliced into a Z hole must refuse with "refused" (Q ⊄ Z).
  *
  * Every numeric result is checked against a hand value. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* ---- a growable memory sink and a cursor source over the same bytes ---- */
@@ -38,13 +38,13 @@ static int fails = 0;
 static int record_cell0(SlateArray *a, int64_t *num_out, int64_t *den_out) {
   uint64_t stride = 0;
   uint64_t probe = 0;                                       /* records needs a non-NULL out even to probe */
-  int rc = slate_array_records(a, &probe, 0, &stride);      /* size-then-fill: 0 bytes -> EOUTSIZE + stride */
-  if (rc != SLATE_BATCH_EOUTSIZE || stride == 0) { printf("  (records probe rc=%d stride=%llu)\n", rc, (unsigned long long)stride); return -1; }
+  const char *rc = slate_array_records(a, &probe, 0, &stride);      /* size-then-fill: 0 bytes -> EOUTSIZE + stride */
+  if (!slate_refused(rc, "outsize") || stride == 0) { printf("  (records probe rc=%s stride=%llu)\n", rc ? rc : "NULL", (unsigned long long)stride); return -1; }
   uint64_t n = slate_array_size(a);
   uint64_t bytes = n * stride * 8;
   uint64_t *buf = (uint64_t *)calloc((size_t)(n * stride), sizeof(uint64_t));
   rc = slate_array_records(a, buf, bytes, &stride);
-  if (rc != SLATE_BATCH_OK) { printf("  (records fill rc=%d)\n", rc); free(buf); return -2; }
+  if (rc != NULL) { printf("  (records fill rc=%s)\n", rc); free(buf); return -2; }
   /* record layout: [valid, sign, L, |num| LE (L limbs), den LE (L limbs)] */
   uint64_t valid = buf[0], sign = buf[1], L = buf[2];
   if (!valid) { free(buf); return -3; }
@@ -71,8 +71,8 @@ static MemSink build_q_sum_fragment(void) {
                 slate_dag_load(b, cidA, slate_dag_lit(b, 2)));
   MemSink out = {0};
   uint32_t holes[1] = {cidA};
-  int rc = slate_dag_save_fragment(b, s, holes, 1, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "save Q-sum fragment");
+  const char *rc = slate_dag_save_fragment(b, s, holes, 1, mem_sink, &out);
+  CHECK(rc == NULL, "save Q-sum fragment");
   slate_dag_free(b);
   return out;
 }
@@ -85,8 +85,8 @@ static MemSink build_z_fragment(void) {
   int32_t root = slate_dag_load(b, cid, slate_dag_lit(b, 0));
   MemSink out = {0};
   uint32_t holes[1] = {cid};
-  int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "save Z hole fragment");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
+  CHECK(rc == NULL, "save Z hole fragment");
   slate_dag_free(b);
   return out;
 }
@@ -105,16 +105,16 @@ int main(void) {
     if (f) {
       uint32_t np = 0, nh = 0;
       slate_iface_receipt root_r;
-      int rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
-      CHECK(rc == SLATE_BATCH_OK, "iface Q fragment ok");
+      const char *rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
+      CHECK(rc == NULL, "iface Q fragment ok");
       CHECK(nh == 1, "iface reports 1 hole");
       slate_hole holes[1];
       uint32_t cap = 1;
       rc = slate_frag_iface(f, NULL, holes, &cap, NULL);
-      CHECK(rc == SLATE_BATCH_OK, "iface fill holes ok");
-      CHECK(holes[0].receipt.kind == 1 /* array/carrier */, "iface hole is an array");
-      CHECK(holes[0].receipt.domain == 2 /* ℚ */, "iface HOLE domain == Q");
-      CHECK(root_r.domain == -1 /* derive/any: save_fragment serializes the root receipt domain as derive */,
+      CHECK(rc == NULL, "iface fill holes ok");
+      CHECK(strcmp(holes[0].receipt.kind, "array") == 0, "iface hole is an array");
+      CHECK(strcmp(holes[0].receipt.domain, "Q") == 0, "iface HOLE domain == Q");
+      CHECK(root_r.domain == NULL /* derive/any: save_fragment serializes the root receipt domain as derive */,
             "iface ROOT domain is derive");
       slate_frag_free(f);
     }
@@ -128,16 +128,16 @@ int main(void) {
     int64_t nums[3] = {1, 3, 5};
     uint32_t cidA = slate_dag_carrier_q(b, nums, 3, 4, 64);
     uint32_t args[1] = {cidA};
-    int32_t root = slate_dag_splice(b, f, args, 1);
+    int32_t root = -1; slate_dag_splice(b, f, args, 1, &root);
     CHECK(root >= 0, "splice real Q carrier ok");
     if (root >= 0) {
       int64_t dims[1] = {1};
       SlateArray *a = slate_dag_run(b, root, dims, 1);
       CHECK(a != NULL, "run Q sum ok");
       if (a) {
-        slate_reading r; slate_array_receipt(a, &r);
-        CHECK(r.exact == 1 && r.refused == 0, "Q sum reading exact");
-        CHECK(r.domain == 2 /* ℚ */, "Q sum result domain == Q");
+        const slate_entry *re; int32_t rn; slate_array_receipt(a, &re, &rn);
+        CHECK(slate_entry_is(re, rn, "verdict", "exact"), "Q sum reading exact");
+        CHECK(slate_entry_is(re, rn, "domain", "Q"), "Q sum result domain == Q");
         int64_t num = 0, den = 0;
         int rc = record_cell0(a, &num, &den);
         CHECK(rc == 0, "records decode Q cell ok");
@@ -158,7 +158,7 @@ int main(void) {
     int64_t zvals[3] = {2, 4, 6};                 /* plain integers */
     uint32_t cidZ = slate_dag_carrier(b, zvals, 3);
     uint32_t args[1] = {cidZ};
-    int32_t root = slate_dag_splice(b, f, args, 1);
+    int32_t root = -1; slate_dag_splice(b, f, args, 1, &root);
     CHECK(root >= 0, "splice Z carrier into Q hole ALLOWED (Z sub Q)");
     if (root >= 0) {
       int64_t dims[1] = {1};
@@ -183,8 +183,8 @@ int main(void) {
     /* sanity: the Z fragment's hole domain is really Z */
     { MemSrc s = {zfrag.buf, zfrag.len, 0}; SlateFrag *zf = slate_frag_load(mem_src, &s);
       if (zf) { slate_hole hp[1]; uint32_t cap = 1;
-        if (slate_frag_iface(zf, NULL, hp, &cap, NULL) == SLATE_BATCH_OK)
-          CHECK(hp[0].receipt.domain == 1 /* ℤ */, "Z fragment hole domain == Z");
+        if (slate_frag_iface(zf, NULL, hp, &cap, NULL) == NULL)
+          CHECK(strcmp(hp[0].receipt.domain, "Z") == 0, "Z fragment hole domain == Z");
         slate_frag_free(zf); } }
 
     MemSrc src = {zfrag.buf, zfrag.len, 0};
@@ -193,10 +193,10 @@ int main(void) {
     int64_t nums[3] = {1, 3, 5};
     uint32_t cidQ = slate_dag_carrier_q(b, nums, 3, 4, 64);   /* a real Q carrier */
     uint32_t args[1] = {cidQ};
-    int32_t rc = slate_dag_splice(b, f, args, 1);
-    CHECK(rc == -SLATE_BATCH_EREFUSED, "splice Q into Z hole REFUSED with -EREFUSED");
-    if (rc != -SLATE_BATCH_EREFUSED)
-      printf("  (got splice rc=%d, expected %d)\n", rc, -SLATE_BATCH_EREFUSED);
+    const char *rc = slate_dag_splice(b, f, args, 1, NULL);
+    CHECK(slate_refused(rc, "refused"), "splice Q into Z hole REFUSED with \"refused\"");
+    if (!slate_refused(rc, "refused"))
+      printf("  (got splice rc=%s, expected \"refused\")\n", rc ? rc : "NULL");
     slate_dag_free(b);
     slate_frag_free(f);
     free(zfrag.buf);

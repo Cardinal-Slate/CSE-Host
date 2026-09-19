@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/resource.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 typedef struct { unsigned char *buf; size_t len, cap; } MemSink;

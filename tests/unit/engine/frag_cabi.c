@@ -1,4 +1,4 @@
-/* The fragment-library door from pure C (slate/array.h). No C++ in this translation unit. Builds a fragment
+/* The fragment-library door from pure C (slate/slate.h). No C++ in this translation unit. Builds a fragment
  * with one hole (A) and one baked constant carrier (C), computing root[i] = A[i]*2 + C[i] over grid[i];
  * serializes it to memory, loads it back, checks the interface, splices it into two fresh builders with
  * different A data, runs, and verifies the exact cells. Then it exercises robustness (bad magic / bad crc /
@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* ---- a growable memory sink and a cursor source over the same bytes ---- */
@@ -40,8 +40,8 @@ static MemSink build_and_save(void) {
   int32_t root = slate_dag_add(b, m, lC);
   MemSink out = {0};
   uint32_t holes[1] = {cidA};
-  int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "save_fragment ok");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
+  CHECK(rc == NULL, "save_fragment ok");
   slate_dag_free(b);
   return out;
 }
@@ -54,14 +54,14 @@ static int splice_run(const MemSink *frag, const int64_t A[4], int64_t out[4]) {
   SlateDag *b = slate_dag_new();
   uint32_t cidA = slate_dag_carrier(b, A, 4);
   uint32_t args[1] = {cidA};
-  int32_t root = slate_dag_splice(b, f, args, 1);
+  int32_t root = -1; slate_dag_splice(b, f, args, 1, &root);
   int rc = -2000;
   if (root >= 0) {
     int64_t dims[1] = {4};
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     if (a) {
       int64_t num[4], den[4];
-      if (slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_OK) {
+      if (slate_array_i64_unsafe(a, num, den) == NULL) {
         for (int i = 0; i < 4; i++) out[i] = num[i];    /* den == 1 for these integer cells */
         rc = 0;
       }
@@ -88,17 +88,17 @@ int main(void) {
     if (f) {
       uint32_t np = 0, nh = 0;
       slate_iface_receipt root_r;
-      int rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
-      CHECK(rc == SLATE_BATCH_OK, "iface ok");
+      const char *rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
+      CHECK(rc == NULL, "iface ok");
       CHECK(np == 1, "iface nparams == 1");
       CHECK(nh == 1, "iface nholes == 1");
       /* size-then-fill: undersized buffer returns EOUTSIZE */
       slate_hole holes[1];
       uint32_t cap0 = 0;
-      CHECK(slate_frag_iface(f, NULL, holes, &cap0, NULL) == SLATE_BATCH_EOUTSIZE, "iface EOUTSIZE on 0 cap");
+      CHECK(slate_refused(slate_frag_iface(f, NULL, holes, &cap0, NULL), "outsize"), "iface EOUTSIZE on 0 cap");
       uint32_t cap1 = 1;
       rc = slate_frag_iface(f, NULL, holes, &cap1, NULL);
-      CHECK(rc == SLATE_BATCH_OK && holes[0].slot == 0 && holes[0].receipt.kind == 1,
+      CHECK(rc == NULL && holes[0].slot == 0 && strcmp(holes[0].receipt.kind, "array") == 0,
             "iface fills the hole (slot 0, array kind)");
       slate_frag_free(f);
     }
@@ -155,8 +155,8 @@ int main(void) {
     uint32_t cidA = slate_dag_carrier(b, A, 4);
     uint32_t args_ok[1] = {cidA};
     uint32_t args_bad[1] = {9999};                    /* not a registered carrier */
-    CHECK(slate_dag_splice(b, f, args_ok, 0) == -SLATE_BATCH_EARGS, "splice wrong arity refused");
-    CHECK(slate_dag_splice(b, f, args_bad, 1) == -SLATE_BATCH_EARGS, "splice bad carrier id refused");
+    CHECK(slate_refused(slate_dag_splice(b, f, args_ok, 0, NULL), "args"), "splice wrong arity refused");
+    CHECK(slate_refused(slate_dag_splice(b, f, args_bad, 1, NULL), "args"), "splice bad carrier id refused");
     slate_dag_free(b);
     slate_frag_free(f);
   }
@@ -192,7 +192,7 @@ int main(void) {
     int32_t root = slate_dag_asr(b, l, slate_dag_lit(b, 1));    /* root[i] = A[i] >> 1 */
     MemSink out = {0};
     uint32_t holes[1] = {cid};
-    CHECK(slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out) == SLATE_BATCH_OK, "asr fragment saved");
+    CHECK(slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out) == NULL, "asr fragment saved");
     slate_dag_free(b);
 
     int64_t A[4] = {8, 9, 10, 100}, res[4] = {0};
@@ -237,18 +237,18 @@ int main(void) {
       CHECK(a != NULL, "carrier INT64_MIN: run produced a result");
       if (a) {
         int64_t num[1], den[1];
-        int rc = slate_array_i64_unsafe(a, num, den);
+        const char *rc = slate_array_i64_unsafe(a, num, den);
         /* fast i64 reader: exact value, or a clean refusal — but never OK-with-0 for a nonzero cell */
-        CHECK(!(rc == SLATE_BATCH_OK && num[0] == 0), "carrier value never silently reads back as 0");
-        if (rc == SLATE_BATCH_OK)
+        CHECK(!(rc == NULL && num[0] == 0), "carrier value never silently reads back as 0");
+        if (rc == NULL)
           CHECK(num[0] == cases[k] && den[0] == 1, "carrier value reads back exactly via i64");
         /* the full sign+magnitude reader must always be exact: sign set for INT64_MIN, magnitude = 2^63 */
         uint64_t stride = 0;
         slate_array_records(a, NULL, 0, &stride);
         uint64_t *rec = (uint64_t *)malloc((size_t)stride * 8);
-        int rrc = slate_array_records(a, rec, stride * 8, &stride);
-        CHECK(rrc == SLATE_BATCH_OK, "records reader ok");
-        if (rrc == SLATE_BATCH_OK) {
+        const char *rrc = slate_array_records(a, rec, stride * 8, &stride);
+        CHECK(rrc == NULL, "records reader ok");
+        if (rrc == NULL) {
           uint64_t want_sign = cases[k] < 0 ? 1 : 0;
           uint64_t want_mag  = cases[k] < 0 ? (~(uint64_t)cases[k] + 1u) : (uint64_t)cases[k];
           CHECK(rec[0] == 1 && rec[1] == want_sign && rec[3] == want_mag,
@@ -272,7 +272,7 @@ int main(void) {
     int32_t root = slate_dag_add(b, p, slate_dag_lit(b, 0));    /* root reads param(1<<20) */
     MemSink fr = {0};
     uint32_t none = 0;
-    CHECK(slate_dag_save_fragment(b, root, &none, 0, mem_sink, &fr) == SLATE_BATCH_OK, "oob-param fragment saved");
+    CHECK(slate_dag_save_fragment(b, root, &none, 0, mem_sink, &fr) == NULL, "oob-param fragment saved");
     slate_dag_free(b);
 
     MemSrc s = {fr.buf, fr.len, 0};
@@ -280,7 +280,7 @@ int main(void) {
     CHECK(f != NULL, "oob-param fragment loads (crc-valid)");
     if (f) {
       SlateDag *b2 = slate_dag_new();
-      int32_t r = slate_dag_splice(b2, f, NULL, 0);
+      int32_t r = -1; slate_dag_splice(b2, f, NULL, 0, &r);
       CHECK(r >= 0, "oob-param fragment splices");
       if (r >= 0) {
         int64_t dims[1] = {1};                                  /* only 1 param provided — slot 1<<20 is OOB */

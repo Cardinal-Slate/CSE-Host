@@ -1,4 +1,4 @@
-/* The OS-effect door from pure C (slate/array.h). No C++ in this translation unit. Installs a host vtable and
+/* The OS-effect door from pure C (slate/slate.h + slate/embed.h). No C++ in this translation unit. Installs a host vtable and
  * grants a capability, builds scalar effect nodes, runs them, and verifies: a granted effect resolves to the
  * host's exact value; identical requests collapse to one host call (the content-hash journal); distinct requests
  * each reach the host; and every un-granted path — capability withheld, wrong capability bit, no host installed —
@@ -6,12 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
+#include "slate/embed.h"
 
-/* A generic effect class is just a boundary channel (a capability-bit index); the bytes on it are protocol,
- * built by a .slate fragment. This test exercises the broker itself, so any class id works — use channel 0. */
-enum { SLATE_FX_GENERIC = 0 };
-#define SLATE_FX_CAPS (1ull << SLATE_FX_GENERIC)
+/* A generic effect class is just a boundary channel, named; the bytes on it are protocol, built by a .slate
+ * fragment. This test exercises the broker itself, so any name works. */
+static const char *const SLATE_FX_GENERIC = "generic";
+static const char *const SLATE_FX_CAPS[] = { "generic" };
+static const char *const SLATE_FX_OTHER[] = { "other" };
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL effect_cabi: %s\n", msg); fails++; } } while (0)
@@ -37,10 +39,10 @@ static int store_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n
   Slot *sl = &st->s[st->count++]; memcpy(sl->word, w, wn); sl->wn = wn; sl->bytes = (uint8_t *)malloc(n ? n : 1); memcpy(sl->bytes, b, n); sl->n = n;
   return 0;
 }
-static int host_perform(uint32_t id, const uint8_t *req, uint64_t reqn,
+static int host_perform(const char *cls, const uint8_t *req, uint64_t reqn,
                         uint8_t **out, uint64_t *outn, void *user) {
   Host *h = (Host *)user;
-  (void)id; (void)req; (void)reqn;
+  (void)cls; (void)req; (void)reqn;
   h->calls++;
   uint8_t *b = (uint8_t *)malloc(8);
   if (!b) return 1;
@@ -56,12 +58,12 @@ static int run1(SlateDag *b, int32_t root, int64_t *v) {
   int64_t dims[1] = {1};
   SlateArray *a = slate_dag_run(b, root, dims, 1);
   if (!a) return -1;                                  /* refused dispatch: no result array */
-  slate_reading rd;
-  int refused = (slate_array_receipt(a, &rd) == SLATE_BATCH_OK && rd.refused);
+  const slate_entry *re; int32_t rn;
+  int refused = (slate_array_receipt(a, &re, &rn) == NULL && slate_entry_is(re, rn, "verdict", "undefined"));
   int64_t num[1], den[1];
-  int rc = slate_array_i64_unsafe(a, num, den);
+  const char *rc = slate_array_i64_unsafe(a, num, den);
   slate_array_free(a);
-  if (refused || rc != SLATE_BATCH_OK) return -1;
+  if (refused || rc != NULL) return -1;
   *v = num[0];
   return 0;
 }
@@ -71,7 +73,8 @@ int main(void) {
   {
     Host h = {0, 42};
     SlateDag *b = slate_dag_new();
-    slate_dag_effect_caps(b, SLATE_FX_CAPS);                       /* permit class SLATE_FX_GENERIC (bit 0) */
+    Store st = {{{{0}, 0, NULL, 0}}, 0}; slate_dag_codec(b, NULL, store_get, store_put, NULL, 0, &st);   /* this block's own empty store */
+    slate_dag_effect_caps(b, SLATE_FX_CAPS, 1);                    /* permit the class, by name */
     slate_dag_effect_host(b, host_perform, NULL, &h);
     int32_t e = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tick", 4, NULL, 0);
     CHECK(e >= 0, "effect node built");
@@ -87,7 +90,7 @@ int main(void) {
     Host h = {0, 21};
     Store st = {{{{0}, 0, NULL, 0}}, 0};
     SlateDag *b = slate_dag_new();
-    slate_dag_effect_caps(b, SLATE_FX_CAPS);
+    slate_dag_effect_caps(b, SLATE_FX_CAPS, 1);
     slate_dag_effect_host(b, host_perform, NULL, &h);
     slate_dag_codec(b, NULL, store_get, store_put, NULL, 0, &st);
     int32_t e1 = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tick", 4, NULL, 0);
@@ -100,11 +103,13 @@ int main(void) {
     slate_dag_free(b);
   }
 
-  /* 3. distinct requests each reach the host (the journal keys on the request bytes, not the node) */
+  /* 3. distinct requests each reach the host (the journal keys on the request bytes, not the node). Each block below
+   installs its own empty store: a shared region store answers a granted ask from a row an earlier block put, by design. */
   {
     Host h = {0, 21};
     SlateDag *b = slate_dag_new();
-    slate_dag_effect_caps(b, SLATE_FX_CAPS);
+    Store st = {{{{0}, 0, NULL, 0}}, 0}; slate_dag_codec(b, NULL, store_get, store_put, NULL, 0, &st);   /* this block's own empty store */
+    slate_dag_effect_caps(b, SLATE_FX_CAPS, 1);
     slate_dag_effect_host(b, host_perform, NULL, &h);
     int32_t e1 = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tick", 4, NULL, 0);
     int32_t e2 = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tock", 4, NULL, 0);
@@ -120,31 +125,34 @@ int main(void) {
   {
     Host h = {0, 42};
     SlateDag *b = slate_dag_new();
+    Store st = {{{{0}, 0, NULL, 0}}, 0}; slate_dag_codec(b, NULL, store_get, store_put, NULL, 0, &st);   /* this block's own empty store */
     slate_dag_effect_host(b, host_perform, NULL, &h);             /* host installed, but no caps granted */
     int32_t e = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tick", 4, NULL, 0);
     int64_t v = 0;
     CHECK(run1(b, e, &v) == -1, "un-permitted effect refuses");
-    CHECK(h.calls == 0, "host never reached without the capability");
+    CHECK(h.calls == 0, "host never reached without the grant");
     slate_dag_free(b);
   }
 
-  /* 5. the wrong capability bit does not grant this class (a mask is not ambient authority) */
+  /* 5. a grant of some other class does not grant this one (a name is not ambient authority) */
   {
     Host h = {0, 42};
     SlateDag *b = slate_dag_new();
-    slate_dag_effect_caps(b, 1ull << 3);                          /* some other class, not SLATE_FX_GENERIC */
+    Store st = {{{{0}, 0, NULL, 0}}, 0}; slate_dag_codec(b, NULL, store_get, store_put, NULL, 0, &st);   /* this block's own empty store */
+    slate_dag_effect_caps(b, SLATE_FX_OTHER, 1);                  /* some other class, not "generic" */
     slate_dag_effect_host(b, host_perform, NULL, &h);
     int32_t e = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tick", 4, NULL, 0);
     int64_t v = 0;
-    CHECK(run1(b, e, &v) == -1, "mismatched capability bit refuses");
-    CHECK(h.calls == 0, "host never reached under the wrong bit");
+    CHECK(run1(b, e, &v) == -1, "a grant of another class refuses");
+    CHECK(h.calls == 0, "host never reached under another class's grant");
     slate_dag_free(b);
   }
 
   /* 6. capability granted but no host installed: still refuses, cleanly */
   {
     SlateDag *b = slate_dag_new();
-    slate_dag_effect_caps(b, SLATE_FX_CAPS);
+    Store st = {{{{0}, 0, NULL, 0}}, 0}; slate_dag_codec(b, NULL, store_get, store_put, NULL, 0, &st);   /* this block's own empty store */
+    slate_dag_effect_caps(b, SLATE_FX_CAPS, 1);
     int32_t e = slate_dag_effect(b, SLATE_FX_GENERIC, (const uint8_t *)"tick", 4, NULL, 0);
     int64_t v = 0;
     CHECK(run1(b, e, &v) == -1, "effect with no host refuses");

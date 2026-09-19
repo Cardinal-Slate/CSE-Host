@@ -3,7 +3,7 @@
  * A fragment multiplies two large holes A[i]*B[i] so every cell exceeds 2^63 (int64). Verified in order:
  *   (1) run without a Potential set — record the behavior (refuse-NULL vs produce).
  *   (2) run with a Potential large enough — the wide result is produced (RNS lane).
- *   (3) slate_array_i64_unsafe on that wide result returns SLATE_BATCH_EWIDE (7), not a
+ *   (3) slate_array_i64_unsafe on that wide result answers "wide", not a
  *       wrong/truncated value.
  *   (4) slate_array_records reconstructs the exact bignum for every cell (checked against a
  *       __int128 value computed here by hand).
@@ -14,11 +14,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* growable memory sink + cursor source (same pattern as frag_cabi.c) */
 typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
+/* the text of a reading entry, for printing (a utf8 entry's bytes are a C string) */
+static const char *ent(const slate_entry *e, int32_t n, const char *name) {
+  const slate_entry *f = slate_entry_find(e, n, name); return f ? (const char *)f->bytes : "-";
+}
 static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
   MemSink *m = (MemSink *)user;
   if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
@@ -71,8 +75,8 @@ static void build_product_fragment(MemSink *out, uint64_t n) {
   int32_t lB = slate_dag_load(b, cidB, p);
   int32_t root = slate_dag_mul(b, lA, lB);
   uint32_t holes[2] = {cidA, cidB};
-  int rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, out);
-  CHECK(rc == SLATE_BATCH_OK, "save 2-hole product fragment");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, out);
+  CHECK(rc == NULL, "save 2-hole product fragment");
   slate_dag_free(b);
   free(ph);
 }
@@ -109,15 +113,15 @@ int main(void) {
     uint32_t cA = slate_dag_carrier(b, A, N);
     uint32_t cB = slate_dag_carrier(b, B, N);
     uint32_t args[2] = {cA, cB};
-    int32_t root = slate_dag_splice(b, f, args, 2);
+    int32_t root = -1; slate_dag_splice(b, f, args, 2, &root);
     CHECK(root >= 0, "splice ok (no-potential run)");
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     if (a) {
       no_potential_produced = 1;
       printf("  FINDING: run WITHOUT explicit Potential produced a wide array (auto-provisioned)\n");
       int64_t num[4], den[4];
-      int rc = slate_array_i64_unsafe(a, num, den);
-      CHECK(rc == SLATE_BATCH_EWIDE, "no-potential: i64_unsafe -> EWIDE(7)");
+      const char *rc = slate_array_i64_unsafe(a, num, den);
+      CHECK(slate_refused(rc, "wide"), "no-potential: i64_unsafe -> EWIDE(7)");
       slate_array_free(a);
     } else {
       printf("  FINDING: run WITHOUT explicit Potential REFUSED (NULL) — Potential is required for wide cells\n");
@@ -131,43 +135,43 @@ int main(void) {
     MemSrc src = {frag.buf, frag.len, 0};
     SlateFrag *f = slate_frag_load(mem_src, &src);
     SlateDag *b = slate_dag_new();
-    int prc = slate_dag_potential(b, 128);          /* 128-bit ceiling >> ~66-bit products */
-    CHECK(prc == SLATE_BATCH_OK, "slate_dag_potential(128) ok");
+    const char *prc = slate_dag_potential(b, 128);          /* 128-bit ceiling >> ~66-bit products */
+    CHECK(prc == NULL, "slate_dag_potential(128) ok");
     uint32_t cA = slate_dag_carrier(b, A, N);
     uint32_t cB = slate_dag_carrier(b, B, N);
     uint32_t args[2] = {cA, cB};
-    int32_t root = slate_dag_splice(b, f, args, 2);
+    int32_t root = -1; slate_dag_splice(b, f, args, 2, &root);
     CHECK(root >= 0, "splice ok (potential run)");
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     CHECK(a != NULL, "wide dispatch PRODUCED a result under Potential=128");
     if (a) {
       CHECK(slate_array_size(a) == N, "result size == N");
-      slate_reading rd; slate_array_receipt(a, &rd);
-      printf("  receipt: exact=%d refused=%d domain=%d path=%d mode=%d work=%llu\n",
-             rd.exact, rd.refused, rd.domain, rd.path, rd.mode, (unsigned long long)rd.work);
-      CHECK(rd.exact == 1 && rd.refused == 0, "receipt: exact, not refused");
+      const slate_entry *re; int32_t rn; slate_array_receipt(a, &re, &rn);
+      printf("  receipt: verdict=%s domain=%s path=%s mode=%s\n",
+             ent(re, rn, "verdict"), ent(re, rn, "domain"), ent(re, rn, "path"), ent(re, rn, "mode"));
+      CHECK(slate_entry_is(re, rn, "verdict", "exact"), "receipt: exact, not refused");
 
       /* (3) the EWIDE refusal path of the int64 pull */
       int64_t num[4], den[4];
-      int rc = slate_array_i64_unsafe(a, num, den);
-      CHECK(rc == SLATE_BATCH_EWIDE, "i64_unsafe -> SLATE_BATCH_EWIDE(7), not a wrong value");
+      const char *rc = slate_array_i64_unsafe(a, num, den);
+      CHECK(slate_refused(rc, "wide"), "i64_unsafe -> \"wide\", not a wrong value");
 
       /* (4) exact bignum readback via records: size-then-fill */
       uint64_t stride = 0, probe = 0;
       /* stride probe: a NULL out now returns EOUTSIZE with *out_stride set (size-then-fill), matching
        * slate_frag_iface/peek NULL-probe ergonomics. */
-      int rnull = slate_array_records(a, NULL, 0, &stride);
-      CHECK(rnull == SLATE_BATCH_EOUTSIZE && stride >= 3, "records: NULL out -> EOUTSIZE stride probe");
-      int r0 = slate_array_records(a, &probe, 0, &stride);
-      CHECK(r0 == SLATE_BATCH_EOUTSIZE, "records size-then-fill: EOUTSIZE on 0 bytes (non-NULL out)");
+      const char *rnull = slate_array_records(a, NULL, 0, &stride);
+      CHECK(slate_refused(rnull, "outsize") && stride >= 3, "records: NULL out -> EOUTSIZE stride probe");
+      const char *r0 = slate_array_records(a, &probe, 0, &stride);
+      CHECK(slate_refused(r0, "outsize"), "records size-then-fill: EOUTSIZE on 0 bytes (non-NULL out)");
       CHECK(stride >= 5, "records stride >= 5 (3 + 2*L, L>=1)");
       printf("  records stride = %llu (=> L = %llu)\n",
              (unsigned long long)stride, (unsigned long long)((stride - 3) / 2));
       uint64_t bytes = N * stride * sizeof(uint64_t);
       uint64_t *rec = (uint64_t *)malloc(bytes);
       uint64_t stride2 = 0;
-      int r1 = slate_array_records(a, rec, bytes, &stride2);
-      CHECK(r1 == SLATE_BATCH_OK && stride2 == stride, "records filled OK, stride stable");
+      const char *r1 = slate_array_records(a, rec, bytes, &stride2);
+      CHECK(r1 == NULL && stride2 == stride, "records filled OK, stride stable");
 
       for (uint64_t i = 0; i < N; i++) {
         int valid, sign; u128 mag, den2;
@@ -197,7 +201,7 @@ int main(void) {
     uint32_t cA = slate_dag_carrier(b, A, N);
     uint32_t cB = slate_dag_carrier(b, B, N);
     uint32_t args[2] = {cA, cB};
-    int32_t root = slate_dag_splice(b, f, args, 2);
+    int32_t root = -1; slate_dag_splice(b, f, args, 2, &root);
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     CHECK(a != NULL, "over-provisioned (P=512) still produces");
     if (a) {
@@ -234,7 +238,7 @@ int main(void) {
     CHECK(a != NULL, "cube dispatch produced under P=256");
     if (a) {
       int64_t num[4], den[4];
-      CHECK(slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_EWIDE, "cube i64_unsafe -> EWIDE");
+      CHECK(slate_refused(slate_array_i64_unsafe(a, num, den), "wide"), "cube i64_unsafe -> EWIDE");
       uint64_t stride = 0, probe = 0; slate_array_records(a, &probe, 0, &stride);
       printf("  cube records stride = %llu (L = %llu)\n",
              (unsigned long long)stride, (unsigned long long)((stride - 3) / 2));
@@ -257,8 +261,8 @@ int main(void) {
   /* -------- (5c) Potential too small: under-provision must not yield a wrong value -------- */
   {
     SlateDag *b = slate_dag_new();
-    int prc = slate_dag_potential(b, 8);             /* 8 bits << ~66-bit product */
-    CHECK(prc == SLATE_BATCH_OK, "potential(8) accepted");
+    const char *prc = slate_dag_potential(b, 8);             /* 8 bits << ~66-bit product */
+    CHECK(prc == NULL, "potential(8) accepted");
     uint32_t cA = slate_dag_carrier(b, A, N);
     uint32_t cB = slate_dag_carrier(b, B, N);
     int32_t p = slate_dag_param(b, 0);
@@ -269,8 +273,8 @@ int main(void) {
       CHECK(1, "under-provision refuses cleanly (NULL)");
     } else {
       /* If it produced, every cell must be either refused(records valid=0) or exact — never wrong. */
-      uint64_t stride = 0, probe = 0; int r0 = slate_array_records(a, &probe, 0, &stride);
-      if (r0 == SLATE_BATCH_EOUTSIZE) {
+      uint64_t stride = 0, probe = 0; const char *r0 = slate_array_records(a, &probe, 0, &stride);
+      if (slate_refused(r0, "outsize")) {
         uint64_t bytes = N * stride * sizeof(uint64_t);
         uint64_t *rec = (uint64_t *)malloc(bytes);
         slate_array_records(a, rec, bytes, &stride);
@@ -286,10 +290,10 @@ int main(void) {
         CHECK(safe, "under-provision: any valid cell is EXACT (no wrong value)");
         free(rec);
       } else {
-        printf("  under-provision produced array; records rc=%d\n", r0);
+        printf("  under-provision produced array; records rc=%s\n", r0 ? r0 : "NULL");
       }
-      slate_reading rd; slate_array_receipt(a, &rd);
-      printf("  under-provision receipt: exact=%d refused=%d\n", rd.exact, rd.refused);
+      const slate_entry *re; int32_t rn; slate_array_receipt(a, &re, &rn);
+      printf("  under-provision receipt: verdict=%s\n", ent(re, rn, "verdict"));
       slate_array_free(a);
     }
     slate_dag_free(b);

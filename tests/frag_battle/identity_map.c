@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* growable memory sink + cursor source over the same bytes (the frag_cabi pattern) */
@@ -47,8 +47,8 @@ int main(void) {
     int32_t root = slate_dag_load(b, cidA, p);        /* the entire graph: one load, zero ops */
     CHECK(root >= 0, "load node id valid (root is a bare load)");
     uint32_t holes[1] = {cidA};
-    int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &frag);
-    CHECK(rc == SLATE_BATCH_OK, "save_fragment ok (zero-op fragment)");
+    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &frag);
+    CHECK(rc == NULL, "save_fragment ok (zero-op fragment)");
     slate_dag_free(b);
   }
   CHECK(frag.len > 0, "fragment serialized nonempty");
@@ -61,17 +61,17 @@ int main(void) {
     if (f) {
       uint32_t np = 999, nh = 999;
       slate_iface_receipt root_r;
-      int rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
-      CHECK(rc == SLATE_BATCH_OK, "iface ok");
+      const char *rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
+      CHECK(rc == NULL, "iface ok");
       CHECK(np == 1, "iface reports 1 param");
       CHECK(nh == 1, "iface reports 1 hole");
       /* fill the hole descriptor: slot 0, array kind */
       slate_hole holes[1];
       uint32_t cap = 1;
       rc = slate_frag_iface(f, NULL, holes, &cap, NULL);
-      CHECK(rc == SLATE_BATCH_OK, "iface fill ok");
+      CHECK(rc == NULL, "iface fill ok");
       CHECK(holes[0].slot == 0, "hole is slot 0");
-      CHECK(holes[0].receipt.kind == 1 /* array/carrier */, "hole is array kind");
+      CHECK(strcmp(holes[0].receipt.kind, "array") == 0, "hole is array kind");
       slate_frag_free(f);
     }
   }
@@ -87,7 +87,7 @@ int main(void) {
       uint32_t cidA = slate_dag_carrier(b, A, N);
       CHECK(cidA != UINT32_MAX, "real A carrier registered");
       uint32_t args[1] = {cidA};
-      int32_t root = slate_dag_splice(b, f, args, 1);
+      int32_t root = -1; slate_dag_splice(b, f, args, 1, &root);
       CHECK(root >= 0, "splice ok (root node returned)");
       if (root >= 0) {
         int64_t dims[1] = {N};
@@ -95,16 +95,16 @@ int main(void) {
         CHECK(a != NULL, "run ok (zero-op dispatch)");
         if (a) {
           /* receipt: exact, not refused, Z domain (integer passthrough) */
-          slate_reading r;
-          int rrc = slate_array_receipt(a, &r);
-          CHECK(rrc == SLATE_BATCH_OK, "receipt read ok");
-          CHECK(r.exact == 1, "reading is exact");
-          CHECK(r.refused == 0, "reading is not refused");
+          const slate_entry *re; int32_t rn;
+          const char *rrc = slate_array_receipt(a, &re, &rn);
+          CHECK(rrc == NULL, "receipt read ok");
+          CHECK(slate_entry_is(re, rn, "verdict", "exact"), "reading is exact");
+          CHECK(!slate_entry_is(re, rn, "verdict", "undefined"), "reading is not refused");
           CHECK(slate_array_size(a) == (uint64_t)N, "result has N cells");
 
           int64_t num[N], den[N];
-          int erc = slate_array_i64_unsafe(a, num, den);
-          CHECK(erc == SLATE_BATCH_OK, "i64 extract ok");
+          const char *erc = slate_array_i64_unsafe(a, num, den);
+          CHECK(erc == NULL, "i64 extract ok");
           /* hand-computed: identity means out == A exactly, den == 1 */
           CHECK(num[0] == 5  && den[0] == 1, "cell0 == 5   (positive)");
           CHECK(num[1] == -3 && den[1] == 1, "cell1 == -3  (negative round-trips)");

@@ -11,20 +11,19 @@
  * Built and run like test_frag_cabi (pure C over the array C ABI). */
 #include <stdio.h>
 #include <stdint.h>
-#include "slate/array.h"
-#include "slate/batch.h"
+#include "slate/slate.h"
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("  CHECK failed: %s\n", (msg)); fails++; } } while (0)
 
-/* run root over a 1-cell grid; return the C ABI rc and (on OK) the cell's num/den. */
-static int run1(SlateDag *d, int32_t root, int64_t *num, int64_t *den) {
+/* run root over a 1-cell grid; return the C ABI answer (NULL = ok, with the cell's num/den). */
+static const char *run1(SlateDag *d, int32_t root, int64_t *num, int64_t *den) {
   int64_t dims[1] = {1};
   SlateArray *a = slate_dag_run(d, root, dims, 1);
-  if (!a) return SLATE_BATCH_EREFUSED;             /* a refused dispatch yields no array — fail-closed */
+  if (!a) return "refused";             /* a refused dispatch yields no array — fail-closed */
   int64_t nn[1], dd[1];
-  int rc = slate_array_i64_unsafe(a, nn, dd);
-  if (rc == SLATE_BATCH_OK) { *num = nn[0]; *den = dd[0]; }
+  const char *rc = slate_array_i64_unsafe(a, nn, dd);
+  if (rc == NULL) { *num = nn[0]; *den = dd[0]; }
   slate_array_free(a);
   return rc;
 }
@@ -32,9 +31,9 @@ static int run1(SlateDag *d, int32_t root, int64_t *num, int64_t *den) {
 /* the reduction must be exact and equal wn/wd as a rational. */
 static void expect_q(const char *name, SlateDag *d, int32_t root, int64_t wn, int64_t wd) {
   int64_t num = 0, den = 0;
-  int rc = run1(d, root, &num, &den);
-  CHECK(rc == SLATE_BATCH_OK, name);
-  if (rc != SLATE_BATCH_OK) { printf("    %s: rc=%d (wanted %lld/%lld)\n", name, rc, (long long)wn, (long long)wd); return; }
+  const char *rc = run1(d, root, &num, &den);
+  CHECK(rc == NULL, name);
+  if (rc != NULL) { printf("    %s: rc=%s (wanted %lld/%lld)\n", name, rc, (long long)wn, (long long)wd); return; }
   if (den < 0) { den = -den; num = -num; }
   int ok = ((__int128)num * wd == (__int128)wn * den);   /* num/den == wn/wd */
   CHECK(ok, name);
@@ -45,9 +44,9 @@ static void expect_q(const char *name, SlateDag *d, int32_t root, int64_t wn, in
  * (a nonzero rc), never return a wrapped/misread int64 value stamped exact. */
 static void expect_closed(const char *name, SlateDag *d, int32_t root) {
   int64_t num = 0, den = 0;
-  int rc = run1(d, root, &num, &den);
-  CHECK(rc != SLATE_BATCH_OK, name);
-  if (rc == SLATE_BATCH_OK) printf("    %s: returned %lld/%lld — expected fail-closed (no wrong value)\n", name, (long long)num, (long long)den);
+  const char *rc = run1(d, root, &num, &den);
+  CHECK(rc != NULL, name);
+  if (rc == NULL) printf("    %s: returned %lld/%lld — expected fail-closed (no wrong value)\n", name, (long long)num, (long long)den);
 }
 
 int main(void) {

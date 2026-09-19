@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* ---- memory sink + cursor source (same pattern as tests/unit/engine/frag_cabi.c) ---- */
@@ -54,8 +54,8 @@ static MemSink build_add_sub(void) {
   int32_t root = slate_dag_sub(b, sum, lA2);         /* (A + B) - A */
   MemSink out = {0};
   uint32_t holes[2] = {cidA, cidB};                  /* slot0 = A, slot1 = B */
-  int rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "T1 save_fragment(A+B-A) ok");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
+  CHECK(rc == NULL, "T1 save_fragment(A+B-A) ok");
   slate_dag_free(b);
   return out;
 }
@@ -74,8 +74,8 @@ static MemSink build_mul_add(void) {
   int32_t root = slate_dag_add(b, prod, lA2);        /* A*B + A */
   MemSink out = {0};
   uint32_t holes[2] = {cidA, cidB};
-  int rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "T2 save_fragment(A*B+A) ok");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
+  CHECK(rc == NULL, "T2 save_fragment(A*B+A) ok");
   slate_dag_free(b);
   return out;
 }
@@ -89,14 +89,14 @@ static int splice_run2(const MemSink *frag, const int64_t arg0[N], const int64_t
   uint32_t c0 = slate_dag_carrier(b, arg0, N);
   uint32_t c1 = slate_dag_carrier(b, arg1, N);
   uint32_t args[2] = {c0, c1};                        /* args[slot] */
-  int32_t root = slate_dag_splice(b, f, args, 2);
+  int32_t root = -1; slate_dag_splice(b, f, args, 2, &root);
   int rc = -2000;
   if (root >= 0) {
     int64_t dims[1] = {N};
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     if (a) {
       int64_t num[N], den[N];
-      if (slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_OK) {
+      if (slate_array_i64_unsafe(a, num, den) == NULL) {
         int okden = 1;
         for (int i = 0; i < N; i++) { out[i] = num[i]; if (den[i] != 1) okden = 0; }
         rc = okden ? 0 : -3000;
@@ -127,19 +127,19 @@ int main(void) {
     CHECK(f != NULL, "T1 frag_load ok");
     uint32_t np = 0, nh = 0;
     slate_iface_receipt root_r;
-    int rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
-    CHECK(rc == SLATE_BATCH_OK, "T1 iface ok");
+    const char *rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
+    CHECK(rc == NULL, "T1 iface ok");
     CHECK(np == 1, "T1 nparams == 1");
     CHECK(nh == 2, "T1 nholes == 2");
     slate_hole holes[2];
     uint32_t cap = 2;
     rc = slate_frag_iface(f, NULL, holes, &cap, NULL);
-    CHECK(rc == SLATE_BATCH_OK, "T1 iface fill ok");
+    CHECK(rc == NULL, "T1 iface fill ok");
     /* order: holes must be reported slot 0 then slot 1 */
     CHECK(holes[0].slot == 0, "T1 hole[0].slot == 0");
     CHECK(holes[1].slot == 1, "T1 hole[1].slot == 1");
-    CHECK(holes[0].receipt.kind == 1 /* array/carrier */, "T1 hole0 is array-kind");
-    CHECK(holes[1].receipt.kind == 1 /* array/carrier */, "T1 hole1 is array-kind");
+    CHECK(strcmp(holes[0].receipt.kind, "array") == 0, "T1 hole0 is array-kind");
+    CHECK(strcmp(holes[1].receipt.kind, "array") == 0, "T1 hole1 is array-kind");
     slate_frag_free(f);
   }
 

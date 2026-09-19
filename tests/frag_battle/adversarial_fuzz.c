@@ -25,7 +25,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
@@ -69,26 +69,26 @@ static int child_run(const unsigned char *buf, size_t len, int enforce_orig) {
   SlateFrag *f = slate_frag_load(mem_src, &s);
   if (!f) return 0;
   uint32_t nparams = 0, nholes = 0;
-  if (slate_frag_iface(f, &nparams, NULL, &nholes, NULL) != SLATE_BATCH_OK) { slate_frag_free(f); return 12; }
+  if (slate_frag_iface(f, &nparams, NULL, &nholes, NULL) != NULL) { slate_frag_free(f); return 12; }
   if (nholes > 64) { slate_frag_free(f); return 12; }
   SlateDag *b = slate_dag_new();
   int64_t A[4] = {1, 2, 3, 4};
   uint32_t args[64];
   for (uint32_t i = 0; i < nholes; i++) args[i] = slate_dag_carrier(b, A, 4);
-  int32_t root = slate_dag_splice(b, f, args, nholes);
+  int32_t root = -1; slate_dag_splice(b, f, args, nholes, &root);
   int code = 12;
   if (root >= 0) {
     int64_t dims[1] = {4};
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     if (a) {
-      slate_reading rd; int32_t dom = -99;
-      if (slate_array_receipt(a, &rd) == SLATE_BATCH_OK) dom = rd.domain;
+      const slate_entry *re; int32_t rn; int valued = 0;
+      if (slate_array_receipt(a, &re, &rn) == NULL) valued = slate_entry_find(re, rn, "domain") != NULL;
       int64_t num[4], den[4];
-      if (slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_OK) {
+      if (slate_array_i64_unsafe(a, num, den) == NULL) {
         if (enforce_orig) {
           code = (num[0]==ORIG[0]&&num[1]==ORIG[1]&&num[2]==ORIG[2]&&num[3]==ORIG[3]) ? 10 : 11;
         } else {
-          code = (dom >= 0 && dom <= 4) ? 10 : 11;
+          code = valued ? 10 : 11;
         }
       } else code = 12;                              /* EWIDE/EREFUSED: defined, clean */
       slate_array_free(a);
@@ -147,8 +147,8 @@ int main(void) {
     int32_t p=slate_dag_param(b,0);
     int32_t root=slate_dag_add(b, slate_dag_mul(b, slate_dag_load(b,cidA,p), slate_dag_lit(b,2)), slate_dag_load(b,cidC,p));
     uint32_t holes[1]={cidA};
-    int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &frag);
-    if (rc != SLATE_BATCH_OK) { printf("FAIL: save_fragment rc=%d\n", rc); return 2; }
+    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &frag);
+    if (rc != NULL) { printf("FAIL: save_fragment rc=%s\n", rc); return 2; }
     slate_dag_free(b);
   }
   size_t LEN = frag.len;
@@ -159,7 +159,7 @@ int main(void) {
     MemSrc s={frag.buf,LEN,0}; SlateFrag*f=slate_frag_load(mem_src,&s);
     if(!f){printf("FAIL: baseline load NULL\n"); return 2;}
     SlateDag*b=slate_dag_new(); int64_t A[4]={1,2,3,4}; uint32_t ca=slate_dag_carrier(b,A,4);
-    int32_t r=slate_dag_splice(b,f,&ca,1); int64_t dims[1]={4}; SlateArray*a=slate_dag_run(b,r,dims,1);
+    int32_t r = -1; slate_dag_splice(b,f,&ca,1, &r); int64_t dims[1]={4}; SlateArray*a=slate_dag_run(b,r,dims,1);
     int64_t num[4],den[4]; slate_array_i64_unsafe(a,num,den);
     if(!(num[0]==12&&num[1]==24&&num[2]==36&&num[3]==48)){printf("FAIL: baseline values %lld,%lld,%lld,%lld\n",(long long)num[0],(long long)num[1],(long long)num[2],(long long)num[3]);return 2;}
     printf("baseline OK: {12,24,36,48}\n");

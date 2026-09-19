@@ -8,7 +8,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <time.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
@@ -43,10 +43,10 @@ int main(int argc, char**argv){
   printf("target it=%d LEN=%zu nb=%d changes:", target, LEN, nb);
   for(int k=0;k<nb;k++) printf(" [%zu]=0x%02x", offs[k], vals[k]);
   printf("\n");
-  uint64_t H[8]; memcpy(H,mut,64);
-  printf("mut header: magic=0x%llx ver=%llu flags=%llu ninstr=%llu root=%llu nparams=%llu ncarrier=%llu pot=%llu\n",
+  uint64_t H[7]; memcpy(H,mut,56);
+  printf("mut header: magic=0x%llx ver=%llu ninstr=%llu root=%llu nparams=%llu ncarrier=%llu pot=%llu\n",
     (unsigned long long)H[0],(unsigned long long)H[1],(unsigned long long)H[2],(unsigned long long)H[3],
-    (unsigned long long)H[4],(unsigned long long)H[5],(unsigned long long)H[6],(unsigned long long)H[7]);
+    (unsigned long long)H[4],(unsigned long long)H[5],(unsigned long long)H[6]);
 
   alarm(15);
   double t0=now();

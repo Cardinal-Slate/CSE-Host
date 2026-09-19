@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
@@ -54,8 +54,8 @@ int main(void) {
     int32_t p = slate_dag_param(b, 0);
     int32_t root = slate_dag_mul(b, slate_dag_load(b, cidA, p), slate_dag_lit(b, 2));
     uint32_t holes[1] = {cidA};
-    int rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &fragF);
-    CHECK(rc == SLATE_BATCH_OK, "save fragment F (A*2)");
+    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &fragF);
+    CHECK(rc == NULL, "save fragment F (A*2)");
     slate_dag_free(b);
   }
   CHECK(fragF.len > 0, "F serialized nonempty");
@@ -68,19 +68,19 @@ int main(void) {
     SlateDag *b = slate_dag_new();
     uint32_t cidA = slate_dag_carrier(b, A, N);
     uint32_t args[1] = {cidA};
-    int32_t root = slate_dag_splice(b, f, args, 1);
+    int32_t root = -1; slate_dag_splice(b, f, args, 1, &root);
     CHECK(root >= 0, "splice F alone");
     int64_t dims[1] = {N};
     SlateArray *a = slate_dag_run(b, root, dims, 1);
     CHECK(a != NULL, "run F alone");
-    slate_reading r; memset(&r, 0, sizeof r);
-    CHECK(slate_array_receipt(a, &r) == SLATE_BATCH_OK, "F receipt read");
-    CHECK(r.exact == 1 && r.refused == 0, "F receipt exact==1");
+    const slate_entry *re = NULL; int32_t rn = 0;
+    CHECK(slate_array_receipt(a, &re, &rn) == NULL, "F receipt read");
+    CHECK(slate_entry_is(re, rn, "verdict", "exact"), "F receipt exact");
     /* The run reading's domain agrees with the static iface: a positional integer result is Z (den==1),
      * derived from the result buffer's representation by slate_array_receipt. */
-    CHECK(r.domain == 1 /* ℤ */, "F run-reading domain is Z (agrees with iface)");
+    CHECK(slate_entry_is(re, rn, "domain", "Z"), "F run-reading domain is Z (agrees with iface)");
     int64_t num[N], den[N];
-    CHECK(slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_OK, "F pull i64");
+    CHECK(slate_array_i64_unsafe(a, num, den) == NULL, "F pull i64");
     int ok = 1; for (int i = 0; i < N; i++) ok &= (num[i] == exp_F[i] && den[i] == 1);
     CHECK(ok, "F values == A*2");
     slate_array_free(a);
@@ -101,14 +101,14 @@ int main(void) {
     uint32_t cidA = slate_dag_carrier(b, placeholderA, N);   /* hole A, wired into F */
     uint32_t cidB = slate_dag_carrier(b, placeholderB, N);   /* hole B, my own */
     uint32_t argsF[1] = {cidA};
-    int32_t spliced = slate_dag_splice(b, f, argsF, 1);      /* == A*2 in b's id space */
+    int32_t spliced = -1; slate_dag_splice(b, f, argsF, 1, &spliced);      /* == A*2 in b's id space */
     CHECK(spliced >= 0, "splice F while building G");
     int32_t p = slate_dag_param(b, 0);
     int32_t g = slate_dag_add(b, spliced, slate_dag_load(b, cidB, p));  /* A*2 + B */
     /* re-save the spliced-and-extended graph as a brand new fragment */
     uint32_t holes[2] = {cidA, cidB};
-    int rc = slate_dag_save_fragment(b, g, holes, 2, mem_sink, &fragG);
-    CHECK(rc == SLATE_BATCH_OK, "re-save spliced result as fragment G");
+    const char *rc = slate_dag_save_fragment(b, g, holes, 2, mem_sink, &fragG);
+    CHECK(rc == NULL, "re-save spliced result as fragment G");
     slate_dag_free(b);
     slate_frag_free(f);
   }
@@ -121,20 +121,20 @@ int main(void) {
     CHECK(f != NULL, "load G");
     uint32_t np = 0, nh = 0;
     slate_iface_receipt root_r; memset(&root_r, 0, sizeof root_r);
-    int rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
-    CHECK(rc == SLATE_BATCH_OK, "G iface ok");
+    const char *rc = slate_frag_iface(f, &np, NULL, &nh, &root_r);
+    CHECK(rc == NULL, "G iface ok");
     CHECK(nh == 2, "G reports 2 holes (A and B)");
-    CHECK(root_r.domain == -1 /* derive/any: save_fragment serializes the root receipt domain as derive */,
+    CHECK(root_r.domain == NULL /* derive/any: save_fragment serializes the root receipt domain as derive */,
           "G root iface domain is derive");
     slate_hole holes[2]; uint32_t cap = 2;
     rc = slate_frag_iface(f, NULL, holes, &cap, NULL);
-    CHECK(rc == SLATE_BATCH_OK, "G iface fill holes");
+    CHECK(rc == NULL, "G iface fill holes");
     /* Both holes are Z arrays. slot field tells us positional order the fragment expects.
      * The holes[] I passed to save_fragment were {cidA, cidB} in that order; the iface should
      * preserve that order so args[0]->A, args[1]->B. Record whatever slots it reports. */
     for (uint32_t i = 0; i < nh; i++) {
-      CHECK(holes[i].receipt.kind == 1 /* array/carrier */, "G hole is array kind");
-      CHECK(holes[i].receipt.domain == 1 /* ℤ */, "G hole domain Z");
+      CHECK(strcmp(holes[i].receipt.kind, "array") == 0, "G hole is array kind");
+      CHECK(strcmp(holes[i].receipt.domain, "Z") == 0, "G hole domain Z");
     }
     g_slot_of_A = holes[0].slot;  /* first-declared hole was A */
     g_slot_of_B = holes[1].slot;  /* second-declared hole was B */
@@ -155,20 +155,20 @@ int main(void) {
     uint32_t cidC = slate_dag_carrier(b, C, N);
     /* args in iface order: position i supplies the i-th reported hole. First reported == A, second == B. */
     uint32_t args[2] = {cidA, cidB};
-    int32_t spliced = slate_dag_splice(b, f, args, 2);       /* == A*2 + B */
+    int32_t spliced = -1; slate_dag_splice(b, f, args, 2, &spliced);       /* == A*2 + B */
     CHECK(spliced >= 0, "splice G (fragment-of-a-fragment)");
     int32_t p = slate_dag_param(b, 0);
     int32_t final = slate_dag_add(b, spliced, slate_dag_load(b, cidC, p));  /* A*2 + B + C */
     int64_t dims[1] = {N};
     SlateArray *a = slate_dag_run(b, final, dims, 1);
     CHECK(a != NULL, "run final (3 levels deep)");
-    slate_reading r; memset(&r, 0, sizeof r);
-    CHECK(slate_array_receipt(a, &r) == SLATE_BATCH_OK, "final receipt read");
-    CHECK(r.exact == 1 && r.refused == 0, "final receipt exact==1 across both seams");
-    CHECK(r.domain == 1 /* ℤ */, "final run-reading domain is Z (agrees with iface)");
+    const slate_entry *re = NULL; int32_t rn = 0;
+    CHECK(slate_array_receipt(a, &re, &rn) == NULL, "final receipt read");
+    CHECK(slate_entry_is(re, rn, "verdict", "exact"), "final receipt exact across both seams");
+    CHECK(slate_entry_is(re, rn, "domain", "Z"), "final run-reading domain is Z (agrees with iface)");
     CHECK((uint64_t)slate_array_size(a) == (uint64_t)N, "final size == N");
     int64_t num[N], den[N];
-    CHECK(slate_array_i64_unsafe(a, num, den) == SLATE_BATCH_OK, "final pull i64");
+    CHECK(slate_array_i64_unsafe(a, num, den) == NULL, "final pull i64");
     printf("  final:");
     for (int i = 0; i < N; i++) printf(" %lld/%lld", (long long)num[i], (long long)den[i]);
     printf("   (want 112 224 336 448)\n");
@@ -181,13 +181,13 @@ int main(void) {
     uint32_t a2 = slate_dag_carrier(b2, A, N);
     uint32_t b2c = slate_dag_carrier(b2, B, N);
     uint32_t args2[2] = {a2, b2c};
-    int32_t root2 = slate_dag_splice(b2, f, args2, 2);
+    int32_t root2 = -1; slate_dag_splice(b2, f, args2, 2, &root2);
     CHECK(root2 >= 0, "splice G alone");
     SlateArray *ga = slate_dag_run(b2, root2, dims, 1);
     CHECK(ga != NULL, "run G alone");
-    slate_reading gr; memset(&gr, 0, sizeof gr);
-    slate_array_receipt(ga, &gr);
-    CHECK(gr.exact == 1, "G-alone receipt exact==1");
+    const slate_entry *ge = NULL; int32_t gn_ = 0;
+    slate_array_receipt(ga, &ge, &gn_);
+    CHECK(slate_entry_is(ge, gn_, "verdict", "exact"), "G-alone receipt exact");
     int64_t gn[N], gd[N];
     slate_array_i64_unsafe(ga, gn, gd);
     int gok = 1; for (int i = 0; i < N; i++) gok &= (gn[i] == exp_G[i] && gd[i] == 1);

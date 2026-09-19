@@ -12,11 +12,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "slate/array.h"
+#include "slate/slate.h"
 #include "slate/stream.h"
 
 /* ---- growable memory sink + cursor source over the same bytes ---- */
 typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
+/* the text of a reading entry, for printing (a utf8 entry's bytes are a C string) */
+static const char *ent(const slate_entry *e, int32_t n, const char *name) {
+  const slate_entry *f = slate_entry_find(e, n, name); return f ? (const char *)f->bytes : "-";
+}
 static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
   MemSink *m = (MemSink *)user;
   if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
@@ -53,8 +57,8 @@ static MemSink build_matmul_fragment(int M, int K, int D) {
   }
   MemSink out = {0};
   uint32_t holes[2] = {cA, cB};   /* both operands unbound; nothing baked */
-  int rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
-  CHECK(rc == SLATE_BATCH_OK, "save_fragment ok (2 holes)");
+  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
+  CHECK(rc == NULL, "save_fragment ok (2 holes)");
   slate_dag_free(b);
   free(phA); free(phB);
   return out;
@@ -81,15 +85,15 @@ static void splice_run_verify(const MemSink *frag, const int64_t *A, const int64
   /* introspect: 2 grid params, 2 array holes */
   uint32_t nparams = 0, nholes = 0;
   slate_iface_receipt root_r;
-  int rc = slate_frag_iface(f, &nparams, NULL, &nholes, &root_r);
-  CHECK(rc == SLATE_BATCH_OK, "iface ok");
+  const char *rc = slate_frag_iface(f, &nparams, NULL, &nholes, &root_r);
+  CHECK(rc == NULL, "iface ok");
   CHECK(nparams == 2, "iface reports 2 grid params");
   CHECK(nholes == 2, "iface reports 2 holes");
   slate_hole holes[2];
   uint32_t cap = 2;
   rc = slate_frag_iface(f, NULL, holes, &cap, NULL);
-  CHECK(rc == SLATE_BATCH_OK, "iface fill holes ok");
-  CHECK(holes[0].receipt.kind == 1 /* array/carrier */ && holes[1].receipt.kind == 1 /* array/carrier */,
+  CHECK(rc == NULL, "iface fill holes ok");
+  CHECK(strcmp(holes[0].receipt.kind, "array") == 0 && strcmp(holes[1].receipt.kind, "array") == 0,
         "both holes are array kind");
 
   /* splice: supply carriers in iface-reported order. holes[k].slot names which declared hole slot k is;
@@ -99,7 +103,7 @@ static void splice_run_verify(const MemSink *frag, const int64_t *A, const int64
   uint32_t cB = slate_dag_carrier(b, B, (uint64_t)K * D);
   uint32_t args[2];
   for (uint32_t h = 0; h < nholes; h++) args[h] = (holes[h].slot == 0) ? cA : cB;
-  int32_t root = slate_dag_splice(b, f, args, 2);
+  int32_t root = -1; slate_dag_splice(b, f, args, 2, &root);
   CHECK(root >= 0, "splice ok (root >= 0)");
 
   if (root >= 0) {
@@ -107,24 +111,24 @@ static void splice_run_verify(const MemSink *frag, const int64_t *A, const int64
     SlateArray *a = slate_dag_run(b, root, dims, 2);
     CHECK(a != NULL, "dispatch over 2D grid ok");
     if (a) {
-      slate_reading r;
-      slate_array_receipt(a, &r);
-      printf("  [%s] reading: exact=%d refused=%d domain=%d path=%d mode=%d closure=%d work=%llu\n",
-             what, r.exact, r.refused, r.domain, r.path, r.mode, r.closure, (unsigned long long)r.work);
-      CHECK(r.refused == 0, "reading not refused");
-      CHECK(r.exact == 1, "reading exact");
+      const slate_entry *re; int32_t rn;
+      slate_array_receipt(a, &re, &rn);
+      printf("  [%s] reading: verdict=%s domain=%s path=%s mode=%s closure=%s\n",
+             what, ent(re, rn, "verdict"), ent(re, rn, "domain"), ent(re, rn, "path"), ent(re, rn, "mode"), ent(re, rn, "closure"));
+      CHECK(!slate_entry_is(re, rn, "verdict", "undefined"), "reading not refused");
+      CHECK(slate_entry_is(re, rn, "verdict", "exact"), "reading exact");
       /* Runtime reading reports domain=Q for these integer-operand, integer-valued reductions, while the
        * static root receipt renders "-> Z". Z is a subset of Q, so the classification is a conservative
        * over-approximation, not a value error (den==1 on every cell, checked below). Accept N/Z/Q here. */
-      CHECK(r.domain == 1 /* ℤ */ || r.domain == 0 /* ℕ */ || r.domain == 2 /* ℚ */,
+      CHECK(slate_entry_is(re, rn, "domain", "Z") || slate_entry_is(re, rn, "domain", "N") || slate_entry_is(re, rn, "domain", "Q"),
             "reading domain in tower {N,Z,Q}");
       CHECK(slate_array_size(a) == (uint64_t)M * D, "result cell count == M*D");
 
       int64_t *num = (int64_t *)malloc((size_t)M * D * sizeof(int64_t));
       int64_t *den = (int64_t *)malloc((size_t)M * D * sizeof(int64_t));
-      int prc = slate_array_i64_unsafe(a, num, den);
-      CHECK(prc == SLATE_BATCH_OK, "i64 pull ok");
-      if (prc == SLATE_BATCH_OK) {
+      const char *prc = slate_array_i64_unsafe(a, num, den);
+      CHECK(prc == NULL, "i64 pull ok");
+      if (prc == NULL) {
         int64_t *C = (int64_t *)malloc((size_t)M * D * sizeof(int64_t));
         ref_matmul(A, B, C, M, K, D);
         int mism = 0;
@@ -212,8 +216,8 @@ int main(void) {
     }
     int64_t dims[2] = {M, D};
     SlateArray *a = slate_dag_run(b, root, dims, 2);
-    if (a) { slate_reading r; slate_array_receipt(a, &r);
-      printf("  [DIRECT non-fragment] reading domain=%d (1=Z,2=Q)\n", r.domain);
+    if (a) { const slate_entry *re; int32_t rn; slate_array_receipt(a, &re, &rn);
+      printf("  [DIRECT non-fragment] reading domain=%s\n", ent(re, rn, "domain"));
       slate_array_free(a); }
     slate_dag_free(b);
   }
