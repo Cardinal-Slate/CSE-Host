@@ -2,6 +2,13 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.4.0
+
+- **`slate_dag_program` and `slate_dag_start`** (embed band). The first sets the word of the row a container
+  runs; the second runs it through the trampoline, refusing with no program, a cleared one, or a word the store
+  does not hold. An entrypoint is a store, a secret and a word; it builds no graph. The trampoline is one loop
+  with two entries (`run_ticks`): a run that handed off, and a start.
+
 ## 0.3.0
 
 - **`slate_dag_lens`** (embed band): pin the builder's prime set. A pinned region asks for the row this lens

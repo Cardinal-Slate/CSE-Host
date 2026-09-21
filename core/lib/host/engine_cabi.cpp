@@ -642,42 +642,27 @@ static uint64_t frag_byte_src(void *dst, uint64_t n, void *u) {
   std::memcpy(dst, s->p + s->cur, n); s->cur += n; return n;
 }
 
-extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
-                                     const int64_t *dims, uint32_t ndims) try {
-  if (!sd_node_ok(b, root) || (!dims && ndims) || !ndims) return nullptr;
-  std::vector<long long> dv(ndims);
-  for (uint32_t i = 0; i < ndims; i++) { if (dims[i] < 0) return nullptr; dv[i] = (long long)dims[i]; }
-  /* activate the builder's own Envelope (Potential, threads, telemetry, channels, executor toggles) for this
-   * dispatch — the scope the setters above patched. Restored on return. */
-  Slate::CtxScope cs(b->arena);
-  std::optional<Slate::engine::DeviceScope> dev;
-  if (b->want_device) dev.emplace();
-  /* the result height is the larger of the caller-declared Potential and the max height the rational (RNS)
-   * carriers need to reconstruct — the output must provision enough channels for both. A pure-int64 build
-   * with no declared Potential leaves this 0 and skips the guard. */
-  long long h = b->hbits > b->arena.env().height_bits ? (long long)b->hbits : b->arena.env().height_bits;
-  std::optional<Slate::Potential> pot;
-  if (h > 0) pot.emplace(h);
-  Slate::ArrayReading ar = b->build.run(root, dv);
-  /* Tail-continuation trampoline: if the dispatch handed off via "slate.tail", resolve the next program's word
-   * through this container's store and run what it names in a fresh arena that shares this container (grant / fds
-   * / providers), and loop. Each hand-off is a finite dispatch, so a cycle of finite programs (a service) is a chain
-   * of finite dispatches — no native stack, no growing graph, the container (e.g. a listening fd) carried across.
-   * A program is a row: the slot holds its word, the store holds its bytes, and a fleet of ticks all read one
-   * program by name with nothing shipped between them. A word the store does not hold ends the service with a
-   * refusal, never a wrong tick. The tick writes its own hand-off back to this container's tail slot, which this
-   * loop reads; a tick that hands off to nothing ends the trampoline. The result buffer owns its cells (outlives
-   * the tick builder), so each tick's builder is freed — nothing accumulates. */
-  std::vector<uint8_t> cur;                     /* the current tick's word; kept so a repeat-tail re-resolves it */
+/* The run trampoline. `cur` is the word of the program to run first (empty: the dispatch already ran, `ar` is
+ * its reading, and the loop only continues if it handed off). If the dispatch handed off via "slate.tail", resolve
+ * the next program's word through this container's store and run what it names in a fresh arena that shares this
+ * container (grant / fds / providers), and loop. Each hand-off is a finite dispatch, so a cycle of finite programs
+ * (a service) is a chain of finite dispatches — no native stack, no growing graph, the container (e.g. a listening
+ * fd) carried across. A program is a row: the slot holds its word, the store holds its bytes, and a fleet of ticks
+ * all read one program with nothing shipped between them. A word the store does not hold ends the service with a
+ * refusal, never a wrong tick. The tick writes its own hand-off back to this container's tail slot, which this loop
+ * reads; a tick that hands off to nothing ends the trampoline. The result buffer owns its cells (outlives the tick
+ * builder), so each tick's builder is freed — nothing accumulates. */
+static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, const std::vector<long long> &dv,
+                                     Slate::ArrayReading ar) {
   while (b->tail_flag_buf) {
     b->tail_flag_buf = false;
     if (!b->tail_prog_buf.empty()) { cur.swap(b->tail_prog_buf); b->tail_prog_buf.clear(); }   /* hand off to a new program */
     else if (cur.empty()) break;               /* a repeat-tail before any named hand-off: nothing to repeat */
     /* else: tail_prog empty + cur set = a repeat-tail — run the same program again (a finite program that loops) */
     std::vector<uint8_t> next;                  /* the program's bytes, resolved by name — the store is the memory */
-    if (!Slate::store_get(b->arena.store_env(), cur.data(), cur.size(), next) || next.empty()) return nullptr;
+    if (!Slate::store_get(b->arena.store_env(), cur.data(), cur.size(), next) || next.empty()) return Slate::ArrayReading{};
     SlateDag *t = new (std::nothrow) SlateDag();
-    if (!t) return nullptr;
+    if (!t) return Slate::ArrayReading{};
     Slate::Envelope &te = t->arena.env(), &be = b->arena.env();
     /* Inherit the container's whole scope by value — config (Potential, budget, executor, telemetry, channels,
      * caps, deadline gate) plus the shared container bindings (grant/fds/providers/host) plus the tail slot —
@@ -686,16 +671,69 @@ extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
     te.inherit_from(be);
     FragByteSrc src{ next.data(), next.size(), 0 };
     SlateFrag *f = slate_frag_load(frag_byte_src, &src);
-    if (!f) { delete t; return nullptr; }
+    if (!f) { delete t; return Slate::ArrayReading{}; }
     int32_t tr = -1; slate_dag_splice(t, f, nullptr, 0, &tr);
     slate_frag_free(f);
-    if (tr < 0) { delete t; return nullptr; }
+    if (tr < 0) { delete t; return Slate::ArrayReading{}; }
     { Slate::CtxScope tcs(t->arena); ar = t->build.run(tr, dv); }
     delete t;                                 /* free the tick's arena — the result buffer already owns its cells */
   }
+  return ar;
+}
+
+/* what both entries set up: the builder's own Envelope active for the dispatch, the device scope, the Potential */
+struct RunScope {
+  Slate::CtxScope cs;
+  std::optional<Slate::engine::DeviceScope> dev;
+  std::optional<Slate::Potential> pot;
+  explicit RunScope(SlateDag *b) : cs(b->arena) {
+    if (b->want_device) dev.emplace();
+    /* the result height is the larger of the caller-declared Potential and the max height the rational (RNS)
+     * carriers need to reconstruct — the output must provision enough channels for both. A pure-int64 build
+     * with no declared Potential leaves this 0 and skips the guard. */
+    long long h = b->hbits > b->arena.env().height_bits ? (long long)b->hbits : b->arena.env().height_bits;
+    if (h > 0) pot.emplace(h);
+  }
+};
+static bool run_dims(const int64_t *dims, uint32_t ndims, std::vector<long long> &dv) {
+  if ((!dims && ndims) || !ndims) return false;
+  dv.resize(ndims);
+  for (uint32_t i = 0; i < ndims; i++) { if (dims[i] < 0) return false; dv[i] = (long long)dims[i]; }
+  return true;
+}
+
+extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
+                                     const int64_t *dims, uint32_t ndims) try {
+  std::vector<long long> dv;
+  if (!sd_node_ok(b, root) || !run_dims(dims, ndims, dv)) return nullptr;
+  RunScope scope(b);
+  Slate::ArrayReading ar = run_ticks(b, {}, dv, b->build.run(root, dv));
   if (!ar.buffer()) return nullptr;            /* refused dispatch (non-lowerable / >int64): no wrong value */
   return new SlateArray{std::move(ar)};
 } catch (...) {
+  return nullptr;
+}
+
+/* start: run the program the context names. The first tick is the configured word; from there it is the same
+ * trampoline as a run that handed off. No graph is built here — which row runs is context, set by
+ * slate_dag_program, the way the lens and the store are. */
+extern "C" SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_t ndims) try {
+  std::vector<long long> dv;
+  if (!b || !run_dims(dims, ndims, dv)) return nullptr;
+  if (b->arena.env().program.empty()) return nullptr;      /* no program: nothing to start */
+  RunScope scope(b);
+  b->tail_flag_buf = true;                                  /* the first tick is a hand-off to the configured word */
+  b->tail_prog_buf = b->arena.env().program;
+  Slate::ArrayReading ar = run_ticks(b, {}, dv, Slate::ArrayReading{});
+  if (!ar.buffer()) return nullptr;
+  return new SlateArray{std::move(ar)};
+} catch (...) {
+  return nullptr;
+}
+
+extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t wn) {
+  if (!b || (wn && !word)) return "args";
+  b->arena.env().program.assign(word, word + wn);
   return nullptr;
 }
 

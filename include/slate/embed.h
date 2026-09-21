@@ -66,6 +66,17 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
 ///         (each must be at least 2 and below 2^24, the width the lane carries).
 const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k);
 
+/// The program this container runs: the word of a row. Context, like the lens — not a node. slate_dag_start
+/// runs it through the run trampoline: the row is read from the store, spliced into a fresh arena sharing this
+/// container (grant / fds / providers), run, and if it hands off with "slate.tail" the next word is run the same
+/// way, until a tick hands off to nothing. `wn` 0 clears it.
+/// @return NULL; "args" on a null builder or a null word with wn > 0.
+const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t wn);
+/// Start the container: run the program its context names (slate_dag_program) over `dims`. Returns the reading
+/// of the last tick, or NULL when no program is set, the store does not hold the word, or a tick refuses. An
+/// entrypoint is a store, a secret and a word; nothing in it is a graph.
+SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_t ndims);
+
 /// Install the deadline/cancel gate. `proceed(user)` is called at each effect boundary; return nonzero to proceed,
 /// 0 to abort the effect (a clean refusal to a bottom). This enforces a wall-clock deadline, a cpu/effect budget,
 /// or cancellation of a long-running server loop — the engine never reads a clock itself; the embedder owns the

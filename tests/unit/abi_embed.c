@@ -293,7 +293,56 @@ int main(void) {
     printf("  program: emit keeps a row and yields its word; run and tail take the word, in this container or another; an unkept word refuses\n");
   }
 
+  /* ---- 8. the program is context: set the word on the container, start it; no graph is built ---- */
+  {
+    Store st; memset(&st, 0, sizeof st);
+    static const char *const CAP_SELF[] = { "slate.emit", "slate.run", "slate.tail" };
+    int64_t v = 0;
+    SlateDag *b0 = slate_dag_new(); slate_dag_codec(b0, NULL, st_get, st_put, NULL, 0, &st);
+    run1(b0, slate_dag_add(b0, slate_dag_lit(b0, 1), slate_dag_lit(b0, 1)), &v); slate_dag_free(b0);
+    const uint64_t wn = st.n ? st.r[0].wn : 0;
+
+    /* one container emits the row 20+22 and reads back its word */
+    SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+    slate_dag_effect_caps(b, CAP_SELF, 3);
+    int32_t sub = slate_dag_add(b, slate_dag_lit(b, 20), slate_dag_lit(b, 22));
+    uint32_t cw = slate_dag_effect_array(b, "slate.emit", NULL, 0, &sub, 1, (int64_t)wn);
+    uint8_t *word = (uint8_t *)calloc(wn ? (size_t)wn : 1, 1);
+    int word_ok = 1;
+    for (uint64_t i = 0; i < wn; i++) {
+      if (run1(b, slate_dag_load(b, cw, slate_dag_lit(b, (int64_t)i)), &v) != 0) { word_ok = 0; break; }
+      word[i] = (uint8_t)v;
+    }
+    CHECK(word_ok, "8: the emitted word could not be read back");
+    slate_dag_free(b);
+
+    /* the entrypoint: a store, a word, start — the reading is the program's */
+    const int64_t one = 1;
+    SlateDag *e = slate_dag_new(); slate_dag_codec(e, NULL, st_get, st_put, NULL, 0, &st);
+    CHECK(slate_dag_start(e, &one, 1) == NULL, "8: a container with no program started");
+    CHECK(slate_dag_program(e, word, wn) == NULL, "8: setting the program refused");
+    SlateArray *a = slate_dag_start(e, &one, 1);
+    CHECK(a != NULL, "8: start refused a kept program");
+    if (a) {
+      int64_t num = 0, den = 1;
+      CHECK(slate_array_i64_unsafe(a, &num, &den) == NULL && den == 1 && num == 42, "8: start read %lld (want 42)", (long long)num);
+      slate_array_free(a);
+    }
+    /* clearing it, and a word the store does not hold, each refuse to start */
+    CHECK(slate_dag_program(e, NULL, 0) == NULL, "8: clearing the program refused");
+    CHECK(slate_dag_start(e, &one, 1) == NULL, "8: a cleared program started");
+    uint8_t *junk = (uint8_t *)malloc(wn ? (size_t)wn : 1);
+    for (uint64_t i = 0; i < wn; i++) junk[i] = (uint8_t)(word[i] ^ 0x5A);
+    slate_dag_program(e, junk, wn);
+    CHECK(slate_dag_start(e, &one, 1) == NULL, "8: an unkept program started");
+    CHECK(slate_dag_program(NULL, word, wn) != NULL, "8: a null builder was accepted");
+    CHECK(slate_dag_program(e, NULL, 4) != NULL, "8: a null word with wn > 0 was accepted");
+    slate_dag_free(e);
+    free(word); free(junk); st_free(&st);
+    printf("  program: the row a container runs is context; start runs it, and refuses with none, a cleared one, or an unkept one\n");
+  }
+
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a row, run by name\n");
+  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a row, run by name; which row is context\n");
   return 0;
 }
