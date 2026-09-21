@@ -163,7 +163,7 @@ struct SlateDag {
   Slate::IoPolicy io_policy;       /* the compose grant (mounts/ports); env().io_policy points here, filled by setters */
   Slate::MemFs    memfs;           /* the per-container ram store backing tmpfs; env().memfs points here — scoped */
   Slate::ProviderRegistry providers;  /* this container's own scheme->provider table; env().providers points here */
-  std::vector<uint8_t> tail_prog_buf;   /* the tail-continuation slot: "slate.tail" writes the next program here */
+  std::vector<uint8_t> tail_prog_buf;   /* the tail-continuation slot: "slate.tail" writes the next program's word here */
   bool tail_flag_buf = false;           /* set when a tail hand-off was recorded; the run trampoline reads it */
   explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), hbits(0), want_device(false) {
     arena.env().frag_ops  = engine_frag_ops();  /* self-hosting seam: emit/run reach the engine, not a host */
@@ -284,6 +284,25 @@ extern "C" const char *slate_dag_channel(SlateDag *b, const char *pin, const cha
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
+/* Pin the region to a share of the prime set. Unlike every other knob on a builder this one reaches the word:
+ * the share is written into a reading's record, so a value read through this share is a different row from the
+ * same value read through another. That is the point — it is what lets hosts divide a number between them and
+ * still agree on what each piece is called, with no message between them. */
+extern "C" const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k) {
+  if (!b || (k && !primes)) return "args";
+  std::vector<int64_t> ps;
+  ps.reserve(k);
+  for (uint32_t i = 0; i < k; i++) {
+    const int64_t p = primes[i];
+    if (p < 2 || p >= ((int64_t)1 << 24)) return "args";        /* outside the width the residue lane carries */
+    for (uint32_t j = 0; j < i; j++) if (primes[j] == p) return "args";   /* a repeat is a non-squarefree modulus */
+    ps.push_back(p);
+  }
+  b->arena.env().channels.primes = std::move(ps);
+  b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
+  return nullptr;
+}
+
 /* The RNS channel cost model — the throughput and dispatch coefficients the planner ranks a lane by. Calibration
  * for cross-hardware benchmarking: it moves which lane the planner picks, never the value (every lane
  * reconstructs the same exact rational). A negative coefficient leaves that one unchanged. */
@@ -640,19 +659,23 @@ extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
   std::optional<Slate::Potential> pot;
   if (h > 0) pot.emplace(h);
   Slate::ArrayReading ar = b->build.run(root, dv);
-  /* Tail-continuation trampoline: if the dispatch handed off via "slate.tail", run the next program in a fresh
-   * arena that shares this container (grant / fds / providers), and loop. Each hand-off is a finite dispatch, so a
-   * cycle of finite `.slate` files (a service) is a chain of finite dispatches — no native stack, no growing graph,
-   * the container (e.g. a listening fd) carried across. The tick writes its own hand-off back to this container's
-   * tail slot, which this loop reads; a tick that hands off to nothing ends the trampoline. The result buffer owns
-   * its cells (outlives the tick builder), so each tick's builder is freed — nothing accumulates. */
-  std::vector<uint8_t> cur;                     /* the current tick's program bytes; kept so a repeat-tail re-runs it */
+  /* Tail-continuation trampoline: if the dispatch handed off via "slate.tail", resolve the next program's word
+   * through this container's store and run what it names in a fresh arena that shares this container (grant / fds
+   * / providers), and loop. Each hand-off is a finite dispatch, so a cycle of finite programs (a service) is a chain
+   * of finite dispatches — no native stack, no growing graph, the container (e.g. a listening fd) carried across.
+   * A program is a row: the slot holds its word, the store holds its bytes, and a fleet of ticks all read one
+   * program by name with nothing shipped between them. A word the store does not hold ends the service with a
+   * refusal, never a wrong tick. The tick writes its own hand-off back to this container's tail slot, which this
+   * loop reads; a tick that hands off to nothing ends the trampoline. The result buffer owns its cells (outlives
+   * the tick builder), so each tick's builder is freed — nothing accumulates. */
+  std::vector<uint8_t> cur;                     /* the current tick's word; kept so a repeat-tail re-resolves it */
   while (b->tail_flag_buf) {
     b->tail_flag_buf = false;
     if (!b->tail_prog_buf.empty()) { cur.swap(b->tail_prog_buf); b->tail_prog_buf.clear(); }   /* hand off to a new program */
     else if (cur.empty()) break;               /* a repeat-tail before any named hand-off: nothing to repeat */
-    /* else: tail_prog empty + cur set = a repeat-tail — run the same program again (a finite file that loops) */
-    std::vector<uint8_t> &next = cur;
+    /* else: tail_prog empty + cur set = a repeat-tail — run the same program again (a finite program that loops) */
+    std::vector<uint8_t> next;                  /* the program's bytes, resolved by name — the store is the memory */
+    if (!Slate::store_get(b->arena.store_env(), cur.data(), cur.size(), next) || next.empty()) return nullptr;
     SlateDag *t = new (std::nothrow) SlateDag();
     if (!t) return nullptr;
     Slate::Envelope &te = t->arena.env(), &be = b->arena.env();
@@ -1485,11 +1508,10 @@ static int frag_splice_impl(Slate::Arena &cx, const uint8_t *prog, uint32_t n, i
   return 0;
 }
 
-/* run: the program is addressed by content — its `.slate` bytes are the request blob (the normalized bytes are
- * the identity; resolution.md: "no ids-as-addresses"). A dynamically-chosen program is resolved by its
- * content/Receipt against the content-addressed store (the address plane) and run by content — never by a
- * transient carrier/node id. (An earlier 'C'|carrier_id form was removed: a carrier id is a local build handle,
- * not an address.) */
+/* run: a program is a row. The request blob (or the io operand) is the program's word; the effect layer resolves
+ * it through the store and splices what it finds. Bytes never cross a door, and a word the store does not hold
+ * refuses. (Earlier forms — bytes in the blob, a 'C'|carrier_id — were removed: bytes are not a name, and a
+ * carrier id is a local build handle, not an address.) */
 /* emit: serialize the sub-DAG rooted at the node id encoded in `blob` (an i32) to canonical .slate bytes,
  * reusing the engine's own save_fragment (normalization + crc). `cx` is a SlateDag's arena (its first member),
  * so we recover the builder to walk it. Built as an array-effect, which resolves in DagBuild::run step 1 —

@@ -178,7 +178,122 @@ int main(void) {
     printf("  search: by shape walks %llu vertices (a budget cuts it, resumable); by computation the collection folds to 108\n", (unsigned long long)visited);
   }
 
+  /* ---- 6. the lens: a share of the prime set is a different row, and a share never half-answers ---- */
+  {
+    Store st; memset(&st, 0, sizeof st);
+    const int64_t a3[3] = { 1000003, 1000033, 1000037 };
+    const int64_t b3[3] = { 1000039, 1000081, 1000099 };
+    long put_unpinned = 0, put_a = 0, put_b = 0, put_a_again = 0;
+
+    /* the same construction, three times: unpinned, then two disjoint shares, over one store */
+    for (int pass = 0; pass < 4; pass++) {
+      SlateDag *b = slate_dag_new();
+      CHECK(b != NULL, "6: builder");
+      slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+      if (pass == 1 || pass == 3) CHECK(slate_dag_lens(b, a3, 3) == NULL, "6: pin a refused");
+      if (pass == 2)              CHECK(slate_dag_lens(b, b3, 3) == NULL, "6: pin b refused");
+      uint32_t c = slate_dag_carrier(b, NULL, 0);
+      const int64_t vals[4] = { 700001, -900002, 1500003, -20004 };
+      slate_dag_carrier_set(b, c, vals, 4);
+      int32_t i0 = slate_dag_param(b, 0);
+      int32_t root = slate_dag_add(b, slate_dag_load(b, c, i0), slate_dag_lit(b, 7));
+      const int64_t dims[1] = { 4 };
+      long before = st.puts;
+      SlateArray *arr = slate_dag_run(b, root, dims, 1);
+      long wrote = st.puts - before;
+      if (pass == 0) put_unpinned = wrote;
+      else if (pass == 1) put_a = wrote;
+      else if (pass == 2) put_b = wrote;
+      else put_a_again = wrote;
+      CHECK(arr != NULL, "6: pass %d produced no reading", pass);
+      slate_array_free(arr);
+      slate_dag_free(b);
+    }
+    /* each of the three named a row of its own: unpinned, share a, share b */
+    CHECK(put_unpinned > 0, "6: the unpinned run kept nothing");
+    CHECK(put_a > 0, "6: share a kept nothing — it was served the unpinned row");
+    CHECK(put_b > 0, "6: share b kept nothing — it was served another share's row");
+    /* and asking for share a a second time is a hit: the same share names the same row */
+    CHECK(put_a_again == 0, "6: share a wrote %ld rows the second time — its name is not stable", put_a_again);
+    printf("  lens: one construction, three prime sets, three rows; the same share twice is one row\n");
+
+    /* the door refuses what would make a bad modulus, rather than accepting it */
+    SlateDag *g = slate_dag_new();
+    const int64_t too_big[1] = { (int64_t)1 << 24 };
+    const int64_t dup[2] = { 1000003, 1000003 };
+    const int64_t one[1] = { 1000003 };
+    CHECK(slate_dag_lens(g, too_big, 1) != NULL, "6: a prime past the lane's width was accepted");
+    CHECK(slate_dag_lens(g, dup, 2) != NULL, "6: a repeated prime was accepted");
+    CHECK(slate_dag_lens(g, NULL, 2) != NULL, "6: a null share with k>0 was accepted");
+    CHECK(slate_dag_lens(NULL, one, 1) != NULL, "6: a null builder was accepted");
+    CHECK(slate_dag_lens(g, NULL, 0) == NULL, "6: unpinning was refused");
+    slate_dag_free(g);
+    printf("  lens: a prime past the lane's width, a repeat, and a null share are each refused\n");
+  }
+
+  /* ---- 7. a program is a row: emit names it, run and tail take the name, a name the store lacks refuses ---- */
+  {
+    Store st; memset(&st, 0, sizeof st);
+    static const char *const CAP_SELF[] = { "slate.emit", "slate.run", "slate.tail" };
+    int64_t v = 0;
+
+    /* the width of a word over this codec, observed from the first row any dispatch keeps */
+    SlateDag *b0 = slate_dag_new(); slate_dag_codec(b0, NULL, st_get, st_put, NULL, 0, &st);
+    run1(b0, slate_dag_add(b0, slate_dag_lit(b0, 1), slate_dag_lit(b0, 1)), &v); slate_dag_free(b0);
+    CHECK(st.n > 0, "7: no row to learn the word width from");
+    const uint64_t wn = st.n ? st.r[0].wn : 0;
+
+    /* emit: the sub-DAG 20+22 becomes a row; the carrier holds its word, nothing else */
+    SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+    slate_dag_effect_caps(b, CAP_SELF, 3);
+    int32_t sub = slate_dag_add(b, slate_dag_lit(b, 20), slate_dag_lit(b, 22));
+    uint32_t cw = slate_dag_effect_array(b, "slate.emit", NULL, 0, &sub, 1, (int64_t)wn);
+    CHECK(cw != UINT32_MAX, "7: emit refused at build");
+    /* run by name: the verdict carrier holds the program's reading as 8 LE byte-cells */
+    uint32_t cv = slate_dag_effect_io(b, "slate.run", NULL, 0, &cw, 1, 8);
+    CHECK(cv != UINT32_MAX, "7: run refused at build");
+    long rows_before = (long)st.n;
+    CHECK(run1(b, slate_dag_load(b, cv, slate_dag_lit(b, 0)), &v) == 0 && v == 42, "7: run by word read %lld (want 42)", (long long)v);
+    CHECK((long)st.n > rows_before, "7: emit kept no row");
+    /* the word itself, cell by cell, so another container can run the program with nothing but its name */
+    uint8_t *word = (uint8_t *)calloc(wn ? (size_t)wn : 1, 1);
+    int word_ok = 1;
+    for (uint64_t i = 0; i < wn; i++) {
+      if (run1(b, slate_dag_load(b, cw, slate_dag_lit(b, (int64_t)i)), &v) != 0) { word_ok = 0; break; }
+      word[i] = (uint8_t)v;
+    }
+    CHECK(word_ok, "7: the emitted word could not be read back");
+    slate_dag_free(b);
+
+    /* a second container over the same store: the name alone runs the program — no bytes crossed */
+    SlateDag *b2 = slate_dag_new(); slate_dag_codec(b2, NULL, st_get, st_put, NULL, 0, &st);
+    slate_dag_effect_caps(b2, CAP_SELF, 3);
+    uint32_t c2 = slate_dag_carrier_bytes(b2, word, wn);
+    uint32_t cv2 = slate_dag_effect_io(b2, "slate.run", NULL, 0, &c2, 1, 8);
+    CHECK(run1(b2, slate_dag_load(b2, cv2, slate_dag_lit(b2, 0)), &v) == 0 && v == 42,
+          "7: a second container could not run the program by name (%lld)", (long long)v);
+    /* the tail: hand off by name; the trampoline resolves it and the dispatch's reading is the program's */
+    uint32_t ct = slate_dag_effect_io(b2, "slate.tail", NULL, 0, &c2, 1, 8);
+    CHECK(run1(b2, slate_dag_load(b2, ct, slate_dag_lit(b2, 0)), &v) == 0 && v == 42,
+          "7: the tail hand-off by name did not run the program (%lld)", (long long)v);
+    slate_dag_free(b2);
+
+    /* a name the store does not hold refuses: a program that was never kept does not exist */
+    SlateDag *b3 = slate_dag_new(); slate_dag_codec(b3, NULL, st_get, st_put, NULL, 0, &st);
+    slate_dag_effect_caps(b3, CAP_SELF, 3);
+    uint8_t *junk = (uint8_t *)malloc(wn ? (size_t)wn : 1);
+    for (uint64_t i = 0; i < wn; i++) junk[i] = (uint8_t)(word[i] ^ 0xA5);
+    uint32_t c3 = slate_dag_carrier_bytes(b3, junk, wn);
+    uint32_t cv3 = slate_dag_effect_io(b3, "slate.run", NULL, 0, &c3, 1, 8);
+    CHECK(run1(b3, slate_dag_load(b3, cv3, slate_dag_lit(b3, 0)), &v) != 0, "7: an unkept name ran (%lld)", (long long)v);
+    uint32_t ct3 = slate_dag_effect_io(b3, "slate.tail", NULL, 0, &c3, 1, 8);
+    CHECK(run1(b3, slate_dag_load(b3, ct3, slate_dag_lit(b3, 0)), &v) != 0, "7: a tail to an unkept name ran (%lld)", (long long)v);
+    slate_dag_free(b3);
+    free(word); free(junk); st_free(&st);
+    printf("  program: emit keeps a row and yields its word; run and tail take the word, in this container or another; an unkept word refuses\n");
+  }
+
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation\n");
+  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a row, run by name\n");
   return 0;
 }

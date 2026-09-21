@@ -50,6 +50,22 @@ const char *slate_dag_tmpfs(SlateDag *b, const char *prefix, int writable);
 /// bind+listen (a server — pair with the accept verb).
 const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int listen);
 
+/// Pin this region to a share of the residue prime set: it computes those channels of every value and no
+/// others. A share that cannot certify a value alone refuses rather than handing back a partial one, so a
+/// pinned host is never the source of a half-answer.
+///
+/// The share is part of a reading's name, so the same value read through two shares is two rows. That is what
+/// lets several hosts each hold a share of one number without speaking to each other: each names its own share
+/// and puts it, and whoever wants the whole value reads the shares back by name. This is the one setting on a
+/// builder that changes which row you are asking for rather than what it costs, which is why it is here and
+/// not in slate/tune.h.
+///
+/// `k` 0 (or a null list) leaves the region unpinned, which is the default and lets the engine choose its own
+/// channels from the a-priori height.
+/// @return NULL; "args" on a null builder, a null list with k > 0, or a prime outside the residue domain
+///         (each must be at least 2 and below 2^24, the width the lane carries).
+const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k);
+
 /// Install the deadline/cancel gate. `proceed(user)` is called at each effect boundary; return nonzero to proceed,
 /// 0 to abort the effect (a clean refusal to a bottom). This enforces a wall-clock deadline, a cpu/effect budget,
 /// or cancellation of a long-running server loop — the engine never reads a clock itself; the embedder owns the

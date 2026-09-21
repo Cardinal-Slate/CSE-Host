@@ -2,6 +2,21 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.3.0
+
+- **`slate_dag_lens`** (embed band): pin the builder's prime set. A pinned region asks for the row this lens
+  names and refuses a prime that would make a bad modulus rather than substituting one; two disjoint lenses over
+  one construction are two rows, the same lens twice is one. It sits in the embedder band because it changes
+  which row is asked for, not what it costs.
+- **The run trampoline resolves by word.** The tail slot holds the next program's word; each tick reads the
+  program from the store before loading it, and a word the store does not hold ends the dispatch as a refusal.
+  `tests/unit/abi_embed.c` gates both: the lens (three rows, one row, refused args) and the program as a row
+  (emit yields a word, run and tail take it in this container or another, an unkept word refuses).
+
+## 0.2.2
+
+- `tests/unit/abi_embed.c` states what holds with memory, not what holds without it.
+
 ## 0.2.1
 
 - `tests/unit/abi_embed.c`: the blocks whose subject is the row install a store; the rest do not. A check that
