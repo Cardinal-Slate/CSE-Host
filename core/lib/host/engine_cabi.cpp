@@ -308,11 +308,7 @@ extern "C" const char *slate_dag_shares(SlateDag *b, uint32_t shares) {
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
-extern "C" const char *slate_dag_place(SlateDag *b, int (*place)(const int64_t *primes, uint32_t k, void *user), void *user) {
-  if (!b) return "args";
-  b->arena.env().place = place; b->arena.env().place_user = user;
-  return nullptr;
-}
+
 
 /* The RNS channel cost model — the throughput and dispatch coefficients the planner ranks a lane by. Calibration
  * for cross-hardware benchmarking: it moves which lane the planner picks, never the value (every lane

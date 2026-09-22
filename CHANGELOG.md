@@ -4,8 +4,9 @@ Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API
 
 ## 0.5.0
 
-- **`slate_dag_shares` and `slate_dag_place`.** The primes set by `slate_dag_lens` divide into shares, and the
-  placement seam is installed per container. The tail trampoline reads a program's row through the one reader.
+- **`slate_dag_shares`.** The primes set by `slate_dag_lens` divide into shares; a run spreads them, placing each
+  share through the effect port under the "place" capability. The tail trampoline reads a program's row through
+  the one reader.
 
 ## 0.4.0
 
