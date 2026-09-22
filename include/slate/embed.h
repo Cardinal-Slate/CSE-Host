@@ -68,8 +68,7 @@ const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k);
 /// The primes set by slate_dag_lens are a roster divided into `shares` units (0 or 1: this container computes them
 /// all itself). A run then spreads: one unit per share, each on its own primes, the readings put back together.
 const char *slate_dag_shares(SlateDag *b, uint32_t shares);
-/// Where a share lives is an effect: grant the "place" class (slate_dag_effect_caps) and answer it in the host's
-/// perform — the request is the share's primes, the answer the unit's address, journaled like any effect.
+
 
 /// The program this container runs: the word of a row. Context, like the lens — not a node. slate_dag_start
 /// runs it through the run trampoline: the row is read from the store, spliced into a fresh arena sharing this
