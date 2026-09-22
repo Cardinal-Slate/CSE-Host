@@ -65,6 +65,13 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
 /// @return NULL; "args" on a null builder, a null list with k > 0, or a prime outside the residue domain
 ///         (each must be at least 2 and below 2^24, the width the lane carries).
 const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k);
+/// The primes set by slate_dag_lens are a roster divided into `shares` units (0 or 1: this container computes them
+/// all itself). A run then spreads: one unit per share, each on its own primes, the readings put back together.
+const char *slate_dag_shares(SlateDag *b, uint32_t shares);
+/// The placement seam: where a share of primes lives, and make it exist. Asked once per share before the share is
+/// run here, so a unit elsewhere computes it into the shared store and the run here is a hit. Return nonzero to
+/// refuse the run. NULL: every share runs in this container.
+const char *slate_dag_place(SlateDag *b, int (*place)(const int64_t *primes, uint32_t k, void *user), void *user);
 
 /// The program this container runs: the word of a row. Context, like the lens — not a node. slate_dag_start
 /// runs it through the run trampoline: the row is read from the store, spliced into a fresh arena sharing this

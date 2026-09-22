@@ -2,6 +2,11 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.5.0
+
+- **`slate_dag_shares` and `slate_dag_place`.** The primes set by `slate_dag_lens` divide into shares, and the
+  placement seam is installed per container. The tail trampoline reads a program's row through the one reader.
+
 ## 0.4.0
 
 - **`slate_dag_program` and `slate_dag_start`** (embed band). The first sets the word of the row a container

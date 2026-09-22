@@ -302,6 +302,17 @@ extern "C" const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
+extern "C" const char *slate_dag_shares(SlateDag *b, uint32_t shares) {
+  if (!b) return "args";
+  b->arena.env().channels.shares = shares;
+  b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
+  return nullptr;
+}
+extern "C" const char *slate_dag_place(SlateDag *b, int (*place)(const int64_t *primes, uint32_t k, void *user), void *user) {
+  if (!b) return "args";
+  b->arena.env().place = place; b->arena.env().place_user = user;
+  return nullptr;
+}
 
 /* The RNS channel cost model — the throughput and dispatch coefficients the planner ranks a lane by. Calibration
  * for cross-hardware benchmarking: it moves which lane the planner picks, never the value (every lane
@@ -660,7 +671,7 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
     else if (cur.empty()) break;               /* a repeat-tail before any named hand-off: nothing to repeat */
     /* else: tail_prog empty + cur set = a repeat-tail — run the same program again (a finite program that loops) */
     std::vector<uint8_t> next;                  /* the program's bytes, resolved by name — the store is the memory */
-    if (!Slate::store_get(b->arena.store_env(), cur.data(), cur.size(), next) || next.empty()) return Slate::ArrayReading{};
+    if (!Slate::effect_program_of(b->arena, cur.data(), cur.size(), next) || next.empty()) return Slate::ArrayReading{};
     SlateDag *t = new (std::nothrow) SlateDag();
     if (!t) return Slate::ArrayReading{};
     Slate::Envelope &te = t->arena.env(), &be = b->arena.env();
