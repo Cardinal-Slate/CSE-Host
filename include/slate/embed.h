@@ -50,36 +50,118 @@ const char *slate_dag_tmpfs(SlateDag *b, const char *prefix, int writable);
 /// bind+listen (a server — pair with the accept verb).
 const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int listen);
 
-/// Pin this region to a share of the residue prime set: it computes those channels of every value and no
-/// others. A share that cannot certify a value alone refuses rather than handing back a partial one, so a
-/// pinned host is never the source of a half-answer.
+/* ---- the lens, the roster and the ask: what this container computes, and what it takes to run the same
+ * construction elsewhere ----
+ *
+ * roster   the whole lens of a word: every data prime, in order. The guard prime is the engine's, never in a
+ *          roster. A word built by a region that carries a roster names the roster, not this container's primes.
+ * shares   how many units the roster is divided into (the split rule).
+ * share    the primes one machine carries: unit j takes roster[lo_j, hi_j) with lo_j = j*k/n,
+ *          hi_j = (j+1)*k/n, k = the roster's size and n = min(shares, k) (shares 0 or 1: one unit, the whole
+ *          roster). That is the one split rule; the placement door in front of the engine runs the same
+ *          arithmetic, so both name the same share.
+ * ask      the bytes that let any machine run the same construction on its own share (slate_dag_ask). */
+
+/// Pin the channels this container computes: it computes those channels of every value and no others. A share
+/// that cannot certify a value alone refuses rather than handing back a partial one, so a pinned host is never
+/// the source of a half-answer.
 ///
-/// The share is part of a reading's name, so the same value read through two shares is two rows. That is what
+/// With no roster set (slate_dag_roster), `primes` is the whole lens of this container's words. With a roster
+/// set, `primes` must be exactly one share of it — roster[lo_j, hi_j) for some unit j under the roster's split
+/// rule — else the call refuses: a container never carries channels that are not a share of the lens its words
+/// name. (So does `k` 0 with a roster set: a container carrying a roster carries one of its shares.)
+///
+/// The lens is part of a reading's name, so the same value read through two lenses is two rows. That is what
 /// lets several hosts each hold a share of one number without speaking to each other: each names its own share
 /// and puts it, and whoever wants the whole value reads the shares back by name. This is the one setting on a
 /// builder that changes which row you are asking for rather than what it costs, which is why it is here and
 /// not in slate/tune.h.
 ///
-/// `k` 0 (or a null list) leaves the region unpinned, which is the default and lets the engine choose its own
-/// channels from the a-priori height.
-/// @return NULL; "args" on a null builder, a null list with k > 0, a repeat, or a prime outside the residue
+/// `k` 0 (or a null list), with no roster set, leaves the region unpinned, which is the default and lets the
+/// engine choose its own channels from the a-priori height.
+/// @return NULL; "args" on a null builder, a null list with k > 0, a repeat, a prime outside the residue
 ///         domain — each must be at least 2, below 2^24 (the width the lane carries), actually prime, and not
-///         the pool's reserved guard prime (the engine's own pool rule, applied at the door).
+///         the pool's reserved guard prime (the engine's own pool rule, applied at the door) — or a list that
+///         is not one share of a roster this container carries.
 const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k);
-/// The primes set by slate_dag_lens are a roster divided into `shares` units (0 or 1: this container computes them
-/// all itself). A run then spreads: one unit per share, each on its own primes, the readings put back together.
+
+/// The whole lens this container's words name, and its division: `primes` is the roster (every data prime, in
+/// order) and `shares` the number of units it divides into under the split rule above. A container with a
+/// roster computes one share of it (slate_dag_lens) and keeps share rows under the roster's words, so another
+/// machine carrying another share of the same roster names the same words for the same construction.
+///
+/// Same prime rule as slate_dag_lens: each at least 2, below 2^24, actually prime, not the pool's guard, no
+/// repeats. `k` 0 (or a null list) clears the roster — this container's `primes` are then the whole lens again.
+/// @return NULL; "args" on a null builder, a null list with k > 0, a prime the pool's rule refuses, or a
+///         roster/`shares` under which this container's already-pinned `primes` are not one share.
+const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k, uint32_t shares);
+
+/// How many units the roster divides into — the split rule's `shares`, set on its own. Kept for compatibility
+/// with the containers that set it beside slate_dag_lens; slate_dag_roster sets both at once. A run never
+/// spreads in process: this container computes its own share and nothing else, and what carries the other
+/// shares is the placement door's question, never the engine's.
+/// @return NULL; "args" on a null builder, or a `shares` under which this container's `primes` are no longer
+///         one share of the roster it carries.
 const char *slate_dag_shares(SlateDag *b, uint32_t shares);
+
+/* ---- the ask: a container's run context, as bytes ----
+ *
+ * The ask is what one machine hands another so it runs the same construction on its own share: the program's
+ * word and the row under it, the dims the last dispatch ran over, the roster and the shares. A program row
+ * carries no lens, so it lives only in the store that kept it; the construction travels with its name and the
+ * taker keeps it under the same word in its own store. Which share the taker carries is the taker's own primes,
+ * handed to slate_dag_take_ask beside the ask.
+ *
+ * The format is Host's, little-endian, byte exact, and versioned by its leading tag:
+ *
+ *     [0x41 'A'][version u8 = 2][shares u32][k u32][roster prime i64] * k
+ *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn [bn u64][program row u8] * bn
+ *
+ * `k` 0 = no roster (this container's own lens is the whole one). `wn` 0 = no program word: the container has
+ * no row to name, and a taker of that ask has nothing to start. `bn` 0 = the row is not in this store (the
+ * taker must already hold it). A reader must refuse a tag or version it does not know rather than guess at
+ * the bytes. */
+
+/// The container's run context as an ask. Writes a malloc'd buffer to *out/*n — the caller frees it with
+/// free(). The dims are the last dispatch's (slate_dag_run or slate_dag_start); a container that has not run
+/// carries none, and the ask says ndims 0.
+/// @return 0; nonzero on a null argument or a buffer that could not be allocated.
+int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n);
+
+/// Configure this container from an ask, with `primes` as its lens — the share this machine carries. Sets the
+/// roster and shares the ask names, then the lens (which must be one share of that roster), then the program
+/// word and the dims. A container configured this way starts with slate_dag_start.
+/// @return NULL; "args" on a null builder, a null/short ask, a tag or version this build does not know, bytes
+///         that run past the ask's end, a roster the pool's rule refuses, or `primes` that are not one share
+///         of the ask's roster.
+const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint64_t n, const int64_t *primes, uint32_t k);
+
+/// The word of cell `i` of a reading: the reading's own word with the cell's index after it, the same name the
+/// engine's per-cell rows are kept under. A deployment hands this to the door in front of the store to ask
+/// whether the root is whole — whether every share of that cell has landed — without the engine being asked
+/// anything. Writes a malloc'd buffer to *out/*n; the caller frees it with free().
+/// @return NULL; "args" on a null argument or a reading that carries no word (a refused dispatch).
+const char *slate_array_cell_word(const SlateArray *a, uint64_t i, uint8_t **out, uint64_t *n);
 
 
 /// The program this container runs: the word of a row. Context, like the lens — not a node. slate_dag_start
 /// runs it through the run trampoline: the row is read from the store, spliced into a fresh arena sharing this
 /// container (grant / fds / providers), run, and if it hands off with "slate.tail" the next word is run the same
 /// way, until a tick hands off to nothing. `wn` 0 clears it.
+///
+/// A container that carries a roster sets this itself if nothing else has: at the first slate_dag_run with a
+/// roster set and no program word, the construction being run is kept as a program row (its fragment bytes,
+/// under their own word) and that word becomes the program — so the ask this container hands another machine
+/// names the construction rather than carrying it. A construction that cannot be saved as a fragment (an
+/// RNS/ℚ, f32 or wide carrier is not fragment-addressable — see slate_dag_save_fragment) is not kept, the run
+/// is unaffected, and the ask then names no program. Clear the word to let the next dispatch name a new one.
 /// @return NULL; "args" on a null builder or a null word with wn > 0.
 const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t wn);
 /// Start the container: run the program its context names (slate_dag_program) over `dims`. Returns the reading
 /// of the last tick, or NULL when no program is set, the store does not hold the word, or a tick refuses. An
-/// entrypoint is a store, a secret and a word; nothing in it is a graph.
+/// entrypoint is a store, a secret and a word; nothing in it is a graph. `dims` NULL with `ndims` 0 runs over
+/// the dims the container already carries — the ones an ask brought (slate_dag_take_ask) or the last dispatch
+/// recorded — and refuses when it carries none.
 SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_t ndims);
 
 /// Install the deadline/cancel gate. `proceed(user)` is called at each effect boundary; return nonzero to proceed,

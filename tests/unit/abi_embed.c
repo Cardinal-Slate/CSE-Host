@@ -344,7 +344,118 @@ int main(void) {
     printf("  program: the row a container runs is context; start runs it, and refuses with none, a cleared one, or an unkept one\n");
   }
 
+  /* ---- 9. the roster, the share, the ask and the cell word: the doors a placement seam uses ---- */
+  {
+    Store st; memset(&st, 0, sizeof st);
+    /* a roster of six primes divided into three units: shares are [0,2), [2,4), [4,6) */
+    const int64_t roster[6] = { 1000003, 1000033, 1000037, 1000039, 1000081, 1000099 };
+    const int64_t share0[2] = { 1000003, 1000033 };
+    const int64_t share1[2] = { 1000037, 1000039 };
+    const int64_t astride[2] = { 1000033, 1000037 };   /* two real primes of the roster, but not one share */
+    const int64_t foreign[2] = { 1000117, 1000121 };   /* not in the roster at all */
+
+    SlateDag *b = slate_dag_new();
+    slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+    CHECK(slate_dag_roster(b, roster, 6, 3) == NULL, "9: the roster was refused");
+    /* the roster takes the same prime rule as the lens */
+    { const int64_t nonprime[1] = { 1000001 };
+      CHECK(slate_refused(slate_dag_roster(b, nonprime, 1, 1), "args"), "9: a non-prime roster was accepted");
+      const int64_t dup2[2] = { 1000003, 1000003 };
+      CHECK(slate_refused(slate_dag_roster(b, dup2, 2, 1), "args"), "9: a repeated roster prime was accepted");
+      CHECK(slate_dag_roster(NULL, roster, 6, 3) != NULL, "9: a null builder was accepted");
+      CHECK(slate_dag_roster(b, NULL, 3, 3) != NULL, "9: a null roster with k>0 was accepted");
+      CHECK(slate_dag_roster(b, roster, 6, 3) == NULL, "9: the roster was refused on the way back"); }
+    /* the lens must be exactly one share of it */
+    CHECK(slate_refused(slate_dag_lens(b, astride, 2), "args"), "9: a lens astride the split was accepted");
+    CHECK(slate_refused(slate_dag_lens(b, foreign, 2), "args"), "9: a lens outside the roster was accepted");
+    CHECK(slate_refused(slate_dag_lens(b, roster, 6), "args"), "9: the whole roster was accepted as one share of three");
+    CHECK(slate_refused(slate_dag_lens(b, NULL, 0), "args"), "9: a container carrying a roster was left share-less");
+    CHECK(slate_dag_lens(b, share0, 2) == NULL, "9: share 0 was refused");
+    CHECK(slate_dag_lens(b, share1, 2) == NULL, "9: share 1 was refused");
+    /* and a split the pinned share no longer fits is refused where it is named */
+    CHECK(slate_refused(slate_dag_shares(b, 2), "args"), "9: a split that leaves the pinned primes astride it was accepted");
+    CHECK(slate_dag_shares(b, 3) == NULL, "9: the roster's own split was refused");
+
+    /* a run with a roster set names its construction: the ask carries a program word and the dims */
+    uint32_t c = slate_dag_carrier(b, NULL, 0);
+    const int64_t vals[4] = { 11, 12, 13, 14 };
+    slate_dag_carrier_set(b, c, vals, 4);
+    int32_t root = slate_dag_add(b, slate_dag_load(b, c, slate_dag_param(b, 0)), slate_dag_lit(b, 7));
+    const int64_t dims[1] = { 4 };
+    SlateArray *arr = slate_dag_run(b, root, dims, 1);
+    CHECK(arr != NULL, "9: the run over a share produced no reading");
+
+    uint8_t *ask = NULL; uint64_t askn = 0;
+    CHECK(slate_dag_ask(b, &ask, &askn) == 0 && ask != NULL, "9: the ask was refused");
+    CHECK(askn >= 2 && ask[0] == 0x41 && ask[1] == 2, "9: the ask does not begin with its tag and version");
+    { uint8_t *nul = NULL; uint64_t nn = 0;
+      CHECK(slate_dag_ask(NULL, &nul, &nn) != 0, "9: a null builder was asked");
+      CHECK(slate_dag_ask(b, NULL, &nn) != 0, "9: a null out was accepted");
+      CHECK(slate_dag_ask(b, &nul, NULL) != 0, "9: a null length was accepted"); }
+    /* the ask reads back exactly what the container carries: shares, the roster, the dims, a program word */
+    if (askn >= 10) {
+      uint32_t shares_r = 0, k_r = 0;
+      for (int i = 0; i < 4; i++) shares_r |= (uint32_t)ask[2 + i] << (8 * i);
+      for (int i = 0; i < 4; i++) k_r |= (uint32_t)ask[6 + i] << (8 * i);
+      CHECK(shares_r == 3 && k_r == 6, "9: the ask says shares %u k %u (want 3, 6)", shares_r, k_r);
+      uint64_t off = 10 + 8 * (uint64_t)k_r;
+      uint32_t nd = 0; for (int i = 0; i < 4; i++) nd |= (uint32_t)ask[off + i] << (8 * i);
+      CHECK(nd == 1, "9: the ask says %u dims (want 1)", nd);
+      uint64_t d0 = 0; for (int i = 0; i < 8; i++) d0 |= (uint64_t)ask[off + 4 + i] << (8 * i);
+      CHECK(d0 == 4, "9: the ask says dim %llu (want 4)", (unsigned long long)d0);
+      uint64_t wn = 0; for (int i = 0; i < 8; i++) wn |= (uint64_t)ask[off + 12 + i] << (8 * i);
+      CHECK(wn > 0, "9: the ask names no program — an API-built construction was not kept as a row");
+      uint64_t bn = 0; for (int i = 0; i < 8 && off + 20 + wn + 8 <= askn; i++) bn |= (uint64_t)ask[off + 20 + wn + i] << (8 * i);
+      CHECK(bn > 0, "9: the ask carries no program row — the construction does not travel with its name");
+      CHECK(askn == off + 28 + wn + bn, "9: the ask is %llu bytes, its own fields say %llu",
+            (unsigned long long)askn, (unsigned long long)(off + 28 + wn + bn));
+    }
+
+    /* the cell word: the reading's word with the cell's index after it */
+    if (arr) {
+      uint8_t *cw0 = NULL, *cw1 = NULL; uint64_t cn0 = 0, cn1 = 0;
+      CHECK(slate_array_cell_word(arr, 0, &cw0, &cn0) == NULL && cn0 > 0, "9: cell 0 has no word");
+      CHECK(slate_array_cell_word(arr, 1, &cw1, &cn1) == NULL && cn1 > 0, "9: cell 1 has no word");
+      CHECK(cn0 != cn1 || memcmp(cw0, cw1, (size_t)cn0) != 0, "9: two cells of one reading share a word");
+      CHECK(slate_array_cell_word(NULL, 0, &cw0, &cn0) != NULL, "9: a null reading was accepted");
+      CHECK(slate_array_cell_word(arr, 0, NULL, &cn0) != NULL, "9: a null out was accepted");
+      free(cw0); free(cw1);
+    }
+
+    /* the round trip: a fresh container takes the ask on a different share of the same roster (the runner
+       carries share 1), and asks back the same bytes — the ask says what to run and over what lens, never who
+       asked. Which share a machine carries is its own primes, handed in beside the ask. */
+    SlateDag *u = slate_dag_new();
+    slate_dag_codec(u, NULL, st_get, st_put, NULL, 0, &st);
+    CHECK(slate_dag_take_ask(u, ask, askn, share0, 2) == NULL, "9: taking the ask on another share was refused");
+    uint8_t *ask2 = NULL; uint64_t ask2n = 0;
+    CHECK(slate_dag_ask(u, &ask2, &ask2n) == 0, "9: the taker's ask was refused");
+    CHECK(ask2n == askn && ask2 && memcmp(ask, ask2, (size_t)askn) == 0,
+          "9: the ask carries who asked — it did not round trip across shares (%llu vs %llu bytes)",
+          (unsigned long long)ask2n, (unsigned long long)askn);
+    /* the taker runs the ask's program on its own share, over the dims the ask carried — no dims named here */
+    SlateArray *ua = slate_dag_start(u, NULL, 0);
+    CHECK(ua != NULL, "9: the taker could not start the ask's program over the ask's dims");
+    slate_array_free(ua);
+    /* an ask whose share is not one of the roster's is refused, and so is a tag this build does not know */
+    { SlateDag *x = slate_dag_new(); slate_dag_codec(x, NULL, st_get, st_put, NULL, 0, &st);
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, astride, 2), "args"), "9: an ask taken astride the split");
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, NULL, 0), "args"), "9: an ask taken with no share");
+      uint8_t *bad = (uint8_t *)malloc((size_t)askn); memcpy(bad, ask, (size_t)askn); bad[0] = 0x42;
+      CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: an unknown tag was taken");
+      bad[0] = 0x41; bad[1] = 9;
+      CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: an unknown version was taken");
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, 4, share1, 2), "args"), "9: a truncated ask was taken");
+      CHECK(slate_dag_take_ask(x, NULL, 0, share1, 2) != NULL, "9: a null ask was taken");
+      free(bad); slate_dag_free(x); }
+
+    free(ask); free(ask2);
+    slate_array_free(arr);
+    slate_dag_free(u); slate_dag_free(b); st_free(&st);
+    printf("  roster: the whole lens and its split; a lens must be one share of it; the ask round trips and the taker starts it on its own share; a cell has a word\n");
+  }
+
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a row, run by name; which row is context\n");
+  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a row, run by name; which row is context; a roster's share, its ask and its cell words\n");
   return 0;
 }

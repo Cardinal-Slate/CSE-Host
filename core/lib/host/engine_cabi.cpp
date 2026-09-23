@@ -164,6 +164,7 @@ struct SlateDag {
   Slate::ProviderRegistry providers;  /* this container's own scheme->provider table; env().providers points here */
   std::vector<uint8_t> tail_prog_buf;   /* the tail-continuation slot: "slate.tail" writes the next program's word here */
   bool tail_flag_buf = false;           /* set when a tail hand-off was recorded; the run trampoline reads it */
+  std::vector<int64_t> dims_buf;        /* the dims of the last dispatch (or the ones an ask brought): the ask's dims */
   explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), want_device(false) {
     arena.env().frag_ops  = engine_frag_ops();  /* self-hosting seam: emit/run reach the engine, not a host */
     arena.env().frag_self = this;               /* typed owner back-pointer; emit verifies it matches the arena */
@@ -184,6 +185,7 @@ struct SlateDag {
 
 struct SlateArray {
   Slate::ArrayReading ar;
+  Slate::Codec codec;   /* the region's codec, copied at the dispatch: what spells this reading's cell words */
   mutable slate_entry entries[8]; mutable uint64_t height = 0;   /* the reading, as entries, filled on ask */
 };
 
@@ -283,29 +285,90 @@ extern "C" const char *slate_dag_channel(SlateDag *b, const char *pin, const cha
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
-/* Pin the region to a share of the prime set. Unlike every other knob on a builder this one reaches the word:
- * the share is written into a reading's record, so a value read through this share is a different row from the
- * same value read through another. That is the point — it is what lets hosts divide a number between them and
- * still agree on what each piece is called, with no message between them. */
-extern "C" const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k) {
-  if (!b || (k && !primes)) return "args";
+/* ---- the lens and the roster: what this container computes, and the whole lens its words name ----
+ *
+ * Unlike every other knob on a builder these reach the word: the lens is written into a reading's record, so a
+ * value read through one lens is a different row from the same value read through another. That is the point —
+ * it is what lets hosts divide a number between them and still agree on what each piece is called, with no
+ * message between them. A container that carries a roster names the roster in its words and computes one share
+ * of it, so two machines on two shares of one roster ask for the same rows. */
+
+/* the pool's rule at the door, one body: each prime at least 2, under the lane's width, actually prime, not the
+ * pool's guard, no repeats. The same rule for a lens and for a roster — they are the same kind of list. */
+static const char *lens_primes_of(const int64_t *primes, uint32_t k, std::vector<int64_t> &out) {
   const int64_t guard = Slate::rns_pool().second;   /* the pool's reserved check channel — not a pinnable one */
-  std::vector<int64_t> ps;
-  ps.reserve(k);
+  out.clear();
+  out.reserve(k);
   for (uint32_t i = 0; i < k; i++) {
     const int64_t p = primes[i];
     if (p < 2 || p >= ((int64_t)1 << 24)) return "args";        /* outside the width the residue lane carries */
     if (p == guard || !Slate::is_prime(p)) return "args";       /* the pool's own rule: prime, and not its guard */
     for (uint32_t j = 0; j < i; j++) if (primes[j] == p) return "args";   /* a repeat is a non-squarefree modulus */
-    ps.push_back(p);
+    out.push_back(p);
   }
-  b->arena.env().channels.primes = std::move(ps);
+  return nullptr;
+}
+
+/* The split rule, one body: a roster of k primes divides into n = min(shares, k) units (shares 0 or 1: one
+ * unit, the whole roster), and unit j carries roster[j*k/n, (j+1)*k/n). The placement door in front of the
+ * engine runs the same arithmetic, so the two name the same share. */
+static uint32_t roster_units(uint32_t shares, size_t k) {
+  if (!k) return 0;
+  const uint32_t n = shares < 2 ? 1u : shares;
+  return n > (uint32_t)k ? (uint32_t)k : n;
+}
+static bool roster_share_bounds(size_t k, uint32_t n, uint32_t j, size_t &lo, size_t &hi) {
+  if (!n || j >= n) return false;
+  lo = (size_t)(((uint64_t)j * (uint64_t)k) / n);
+  hi = (size_t)((((uint64_t)j + 1) * (uint64_t)k) / n);
+  return lo < hi;
+}
+/* is `ps` exactly one share of `roster` under `shares`? */
+static bool roster_share_index(const std::vector<int64_t> &roster, uint32_t shares,
+                               const std::vector<int64_t> &ps, uint32_t *out_j) {
+  const uint32_t n = roster_units(shares, roster.size());
+  for (uint32_t j = 0; j < n; j++) {
+    size_t lo = 0, hi = 0;
+    if (!roster_share_bounds(roster.size(), n, j, lo, hi)) continue;
+    if (hi - lo != ps.size()) continue;
+    if (std::equal(roster.begin() + (ptrdiff_t)lo, roster.begin() + (ptrdiff_t)hi, ps.begin())) {
+      if (out_j) *out_j = j;
+      return true;
+    }
+  }
+  return false;
+}
+
+extern "C" const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k) {
+  if (!b || (k && !primes)) return "args";
+  std::vector<int64_t> ps;
+  if (const char *rc = lens_primes_of(primes, k, ps)) return rc;
+  Slate::engine::ChannelPolicy &cp = b->arena.env().channels;
+  /* with a roster set these are the channels this container computes: exactly one share of it, never a set that
+     straddles the split (and never none — a container carrying a roster carries one of its shares). */
+  if (!cp.roster.empty() && !roster_share_index(cp.roster, cp.shares, ps, nullptr)) return "args";
+  cp.primes = std::move(ps);
+  b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
+  return nullptr;
+}
+extern "C" const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k, uint32_t shares) {
+  if (!b || (k && !primes)) return "args";
+  std::vector<int64_t> rs;
+  if (const char *rc = lens_primes_of(primes, k, rs)) return rc;
+  Slate::engine::ChannelPolicy &cp = b->arena.env().channels;
+  /* a lens already pinned must still be one share of the roster being set — the two are one statement */
+  if (!rs.empty() && !cp.primes.empty() && !roster_share_index(rs, shares, cp.primes, nullptr)) return "args";
+  cp.roster = std::move(rs);
+  cp.shares = shares;
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
 extern "C" const char *slate_dag_shares(SlateDag *b, uint32_t shares) {
   if (!b) return "args";
-  b->arena.env().channels.shares = shares;
+  Slate::engine::ChannelPolicy &cp = b->arena.env().channels;
+  if (!cp.roster.empty() && !cp.primes.empty() && !roster_share_index(cp.roster, shares, cp.primes, nullptr))
+    return "args";                                  /* the new split would leave this container's primes astride it */
+  cp.shares = shares;
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
@@ -718,11 +781,48 @@ struct RunScope {
     if (h > 0) pot.emplace(h);
   }
 };
-static bool run_dims(const int64_t *dims, uint32_t ndims, std::vector<long long> &dv) {
+/* The dims of this dispatch, recorded on the container as it goes — they are part of what an ask carries, and
+ * a container has nowhere else to keep them. `recall`: with no dims named, start over the ones the container
+ * already carries (an ask's dims, or the last dispatch's); a container that carries none has no grid to run.
+ * A run of a named root never recalls — its dims are the caller's, as they have always been. */
+static bool run_dims(SlateDag *b, bool recall, const int64_t *dims, uint32_t ndims, std::vector<long long> &dv) {
+  if (recall && !dims && !ndims) {
+    if (b->dims_buf.empty()) return false;
+    dv.assign(b->dims_buf.begin(), b->dims_buf.end());
+    return true;
+  }
   if ((!dims && ndims) || !ndims) return false;
   dv.resize(ndims);
   for (uint32_t i = 0; i < ndims; i++) { if (dims[i] < 0) return false; dv[i] = (long long)dims[i]; }
+  b->dims_buf.assign(dims, dims + ndims);   /* what this container last ran over: the ask's dims */
   return true;
+}
+
+/* Keep the construction rooted at `root` as a program row, and name it: the graph's fragment bytes put under
+ * their own word, exactly as the emit door keeps one, and that word set as this container's program. A machine
+ * that takes this container's ask then has a name for the construction and needs none of its bytes. A graph
+ * that is not fragment-addressable (an RNS/ℚ, f32 or wide carrier — see slate_dag_save_fragment) cannot be
+ * kept; the run is unaffected and the ask names no program. */
+static void keep_program_row(SlateDag *b, int32_t root) {
+  struct MBuf { uint8_t *p; size_t n, cap; } mb{ nullptr, 0, 0 };
+  slate_sink msink = [](const void *p, uint64_t n, void *u) -> uint64_t {
+    MBuf *m = static_cast<MBuf *>(u);
+    if (m->n + n > m->cap) {
+      size_t nc = (m->n + n) * 2 + 64;
+      uint8_t *np = static_cast<uint8_t *>(std::realloc(m->p, nc));
+      if (!np) return 0;
+      m->p = np; m->cap = nc;
+    }
+    std::memcpy(m->p + m->n, p, n); m->n += n; return n;
+  };
+  const char *rc = slate_dag_save_fragment(b, root, nullptr, 0, msink, &mb);
+  if (rc != nullptr || mb.n == 0) { std::free(mb.p); return; }
+  const Slate::Word w = Slate::word_of(b->arena.env().codec, mb.p, mb.n);   /* the program is a binary: its word is its bytes' */
+  std::vector<uint8_t> have;                                               /* look it up before keeping: a row already there is a hit */
+  const bool kept = Slate::row_get(b->arena.store_env().codec, w, have) ||
+                    Slate::row_put(b->arena.store_env().codec, w, Slate::row_of_bytes(mb.p, mb.n));
+  std::free(mb.p);
+  if (kept) b->arena.env().program.assign(w.begin(), w.end());
 }
 
 /* One body for both dispatch doors: the builder's own scope, the first step, then the trampoline. `root` >= 0
@@ -730,7 +830,9 @@ static bool run_dims(const int64_t *dims, uint32_t ndims, std::vector<long long>
  * word, and from there it is the same trampoline as a run that handed off. */
 static SlateArray *dag_dispatch(SlateDag *b, int32_t root, const int64_t *dims, uint32_t ndims) {
   std::vector<long long> dv;
-  if (!b || !run_dims(dims, ndims, dv)) return nullptr;
+  if (!b || !run_dims(b, root < 0, dims, ndims, dv)) return nullptr;
+  if (root >= 0 && !b->arena.env().channels.roster.empty() && b->arena.env().program.empty())
+    keep_program_row(b, root);                 /* a container carrying a roster names its construction first */
   if (root < 0 && b->arena.env().program.empty()) return nullptr;   /* no program: nothing to start */
   RunScope scope(b);
   Slate::ArrayReading first;
@@ -742,7 +844,7 @@ static SlateArray *dag_dispatch(SlateDag *b, int32_t root, const int64_t *dims, 
   }
   Slate::ArrayReading ar = run_ticks(b, {}, dv, std::move(first));
   if (!ar.buffer()) return nullptr;            /* refused dispatch (non-lowerable / >int64): no wrong value */
-  return new SlateArray{std::move(ar)};
+  return new SlateArray{std::move(ar), b->arena.env().codec};
 }
 
 extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
@@ -767,9 +869,115 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
   return nullptr;
 }
 
+/* ---- the ask: a container's run context as bytes, so another machine runs the same construction on its own
+ * share. Host's own format, little-endian and byte exact, versioned by its leading tag (embed.h spells it):
+ *
+ *     [0x41 'A'][version u8 = 2][shares u32][k u32][roster prime i64] * k
+ *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn [bn u64][program row u8] * bn
+ *
+ * The construction travels with its name: the program word and the row under it, as this container's store
+ * holds it. A program row carries no lens, so it lives only where it was kept; the taker keeps the row it was
+ * handed under the same word in its own store and runs it from there. Which share the taker carries is the
+ * taker's own primes, handed to slate_dag_take_ask beside the ask. ---- */
+enum : uint8_t { kAskTag = 0x41, kAskVersion = 2 };
+static void ask_put_u32(std::vector<uint8_t> &b, uint32_t v) {
+  for (int i = 0; i < 4; i++) b.push_back((uint8_t)(v >> (8 * i)));
+}
+static void ask_put_u64(std::vector<uint8_t> &b, uint64_t v) {
+  for (int i = 0; i < 8; i++) b.push_back((uint8_t)(v >> (8 * i)));
+}
+/* the reader side: every read is bounds-checked against the ask's end, so a short or malformed ask refuses
+ * rather than reading past it. */
+struct AskRd {
+  const uint8_t *p; uint64_t n, cur;
+  bool u8v(uint8_t &v) { if (cur + 1 > n) return false; v = p[cur++]; return true; }
+  bool u32v(uint32_t &v) { if (cur + 4 > n) return false; v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)p[cur + (uint64_t)i] << (8 * i); cur += 4; return true; }
+  bool u64v(uint64_t &v) { if (cur + 8 > n) return false; v = 0;
+    for (int i = 0; i < 8; i++) v |= (uint64_t)p[cur + (uint64_t)i] << (8 * i); cur += 8; return true; }
+  bool i64v(int64_t &v) { uint64_t u = 0; if (!u64v(u)) return false; v = (int64_t)u; return true; }
+};
+
+extern "C" int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n) try {
+  if (!b || !out || !n) return 1;
+  const Slate::Envelope &e = b->arena.env();
+  const std::vector<int64_t> &roster = e.channels.roster;
+  std::vector<uint8_t> a;
+  a.push_back(kAskTag); a.push_back(kAskVersion);
+  ask_put_u32(a, e.channels.shares);
+  ask_put_u32(a, (uint32_t)roster.size());
+  for (int64_t p : roster) ask_put_u64(a, (uint64_t)p);
+  ask_put_u32(a, (uint32_t)b->dims_buf.size());
+  for (int64_t d : b->dims_buf) ask_put_u64(a, (uint64_t)d);
+  ask_put_u64(a, (uint64_t)e.program.size());
+  a.insert(a.end(), e.program.begin(), e.program.end());
+  std::vector<uint8_t> row;                    /* the row under the word, as this store holds it; none if it is not here */
+  if (!e.program.empty()) Slate::store_get(const_cast<SlateDag *>(b)->arena.store_env(), e.program.data(), e.program.size(), row);
+  ask_put_u64(a, (uint64_t)row.size());
+  a.insert(a.end(), row.begin(), row.end());
+  uint8_t *o = (uint8_t *)std::malloc(a.size());
+  if (!o) return 1;
+  std::memcpy(o, a.data(), a.size());
+  *out = o; *n = (uint64_t)a.size();
+  return 0;
+} catch (...) { return 1; }
+
+extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint64_t n,
+                                          const int64_t *primes, uint32_t k) try {
+  if (!b || !ask || !n || (k && !primes)) return "args";
+  AskRd r{ ask, n, 0 };
+  uint8_t tag = 0, ver = 0;
+  if (!r.u8v(tag) || !r.u8v(ver) || tag != kAskTag || ver != kAskVersion) return "args";
+  uint32_t shares = 0, rk = 0, ndims = 0;
+  if (!r.u32v(shares) || !r.u32v(rk)) return "args";
+  std::vector<int64_t> roster(rk);
+  for (uint32_t i = 0; i < rk; i++) if (!r.i64v(roster[i])) return "args";
+  if (!r.u32v(ndims)) return "args";
+  std::vector<int64_t> dims(ndims);
+  for (uint32_t i = 0; i < ndims; i++) { if (!r.i64v(dims[i]) || dims[i] < 0) return "args"; }
+  uint64_t wn = 0;
+  if (!r.u64v(wn) || r.cur + wn > r.n) return "args";
+  const uint8_t *word = ask + r.cur;
+  r.cur += wn;
+  uint64_t bn = 0;
+  if (!r.u64v(bn) || r.cur + bn > r.n) return "args";
+  const uint8_t *row = ask + r.cur;
+  /* the roster and the split first, then this machine's own share of it, then what to run and over what. The
+     lens goes first so an ask always lands on a fresh statement — a container's old primes are not a reason
+     to refuse the roster its ask names. */
+  b->arena.env().channels.primes.clear();
+  if (const char *rc = slate_dag_roster(b, rk ? roster.data() : nullptr, rk, shares)) return rc;
+  if (const char *rc = slate_dag_lens(b, k ? primes : nullptr, k)) return rc;
+  if (const char *rc = slate_dag_program(b, wn ? word : nullptr, wn)) return rc;
+  /* the construction the ask carries is kept here, under its word, so this container runs it from its own store */
+  if (wn && bn && !Slate::store_put(b->arena.store_env(), word, wn, row, bn)) return "refused";
+  b->dims_buf = std::move(dims);
+  return nullptr;
+} catch (...) { return "internal"; }
+
 extern "C" uint64_t slate_array_size(const SlateArray *a) {
   return a ? (uint64_t)a->ar.size() : 0;
 }
+
+/* The word of one cell of a reading: the reading's own word with the cell's index after it — the same name the
+ * engine keeps that cell's row under (cells_put spells it word_cat(key, word_i64(i))), through the same codec
+ * the dispatch ran with. A deployment hands it to the door in front of the store to ask whether the root is
+ * whole; nothing here asks the engine anything. */
+extern "C" const char *slate_array_cell_word(const SlateArray *a, uint64_t i, uint8_t **out, uint64_t *n) try {
+  if (!a || !out || !n) return "args";
+  const Slate::WBuffer &w = a->ar.word();
+  const size_t wn = Slate::plane_bytes(w);
+  if (!wn) return "args";                       /* a refused dispatch carries no word */
+  const Slate::Word key((const uint8_t *)w.raw_plane(), (const uint8_t *)w.raw_plane() + wn);
+  const Slate::Word iw = Slate::word_i64(a->codec, (int64_t)i);
+  const Slate::Word ki = Slate::word_cat(a->codec, { &key, &iw });
+  if (ki.empty()) return "args";
+  uint8_t *o = (uint8_t *)std::malloc(ki.size());
+  if (!o) return "internal";
+  std::memcpy(o, ki.data(), ki.size());
+  *out = o; *n = (uint64_t)ki.size();
+  return nullptr;
+} catch (...) { return "internal"; }
 
 /* The result's reading — the certification carried with the result, no cell values pulled. The primary
  * way to consume a result: read the frame, keep the values resident (chain another build, or persist with

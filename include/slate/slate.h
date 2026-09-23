@@ -15,7 +15,7 @@
 ///
 /// Two more bands sit beside this one: `slate/embed.h` (an embedder's effects, sandbox, async, search) and
 /// `slate/tune.h` (cost knobs — who computes, never the value). A provider links the floor headers (`rns.h`,
-/// `device/seam.h`, `gpu.h`, `orchestrate.h`, `profile.h`).
+/// `device/seam.h`, `gpu.h`, `profile.h`).
 ///
 /// Ownership & threading: a builder and its results are caller-owned (free with slate_dag_free /
 /// slate_array_free). An Arena is single-threaded — a SlateDag must not be shared across threads; a SlateArray,

@@ -2,6 +2,36 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.7.0
+
+- **`slate_dag_roster`** (embed band): the whole lens a container's words name, and its division. The primes
+  take the same rule as `slate_dag_lens` (at least 2, under 2^24, prime, not the pool's guard, no repeats);
+  `k` 0 clears it. With a roster set, `slate_dag_lens` must name exactly one share of it —
+  `roster[j*k/n, (j+1)*k/n)` for some unit j, n = min(shares, k), shares 0 or 1 = one unit — else `"args"`,
+  and so does a `slate_dag_shares` whose split would leave the pinned primes astride it. That is the one split
+  rule; the door in front of the store runs the same arithmetic, so the two name the same share. A container
+  never carries channels that are not a share of the lens its words name, so `slate_dag_lens(b, NULL, 0)` with
+  a roster set refuses too.
+- **`slate_dag_shares`** keeps its signature and means shares over the roster. A run never spreads in process:
+  the container computes its own share and nothing else, and what carries the other shares is the placement
+  door's question, never the engine's.
+- **The ask: `slate_dag_ask` / `slate_dag_take_ask`.** The bytes that let another machine run the same
+  construction on its own share — the program's word, the last dispatch's dims, the roster and the shares, and
+  nothing else. Host's own format, little-endian, byte exact, versioned by its leading tag (embed.h spells it):
+  `[0x41 'A'][version u8 = 1][shares u32][k u32][roster prime i64]*k [ndims u32][dim i64]*ndims [wn u64][word u8]*wn`.
+  A reader refuses a tag or version it does not know, and every field is bounds-checked against the ask's end.
+  `slate_dag_take_ask` configures a container from one with `primes` as its own share; `slate_dag_start` with
+  no dims named runs over the dims the ask brought.
+- **A construction built through the API is named before it is run.** At `slate_dag_run` with a roster set and
+  no program word, the graph is kept as a program row first — its fragment bytes under their own word, the same
+  keep the emit door makes — and that word becomes the container's program, so the ask names the construction
+  rather than carrying it. A graph that is not fragment-addressable (an RNS/ℚ, f32 or wide carrier) is not
+  kept; the run is unaffected and the ask names no program.
+- **`slate_array_cell_word`**: the word of cell i of a reading — the reading's own word with the index after
+  it, the same name the engine keeps that cell's row under. A deployment asks the door in front of the store
+  whether the root is whole with it; the engine is asked nothing.
+- The orchestrate seam is gone from the tree, and with it its mention in `slate.h`'s provider header list.
+
 ## 0.6.0
 
 - `slate_dag_lens` refuses a pinned prime that is not prime, not distinct, outside the pool's range or the
