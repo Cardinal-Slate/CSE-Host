@@ -157,7 +157,6 @@ struct SlateDag {
   Slate::Arena arena;
   Slate::DagBuild build;
   bool err;
-  int hbits;          /* max declared height over rational (RNS) carriers; 0 = pure-int64 (no Potential needed) */
   bool want_device;   /* the scope's device-executor choice; run() opens a DeviceScope so dispatch routes to it */
   Slate::EffectHost effect_host;   /* the OS-effect vtable; env().effect_host points here once installed */
   Slate::IoPolicy io_policy;       /* the compose grant (mounts/ports); env().io_policy points here, filled by setters */
@@ -165,7 +164,7 @@ struct SlateDag {
   Slate::ProviderRegistry providers;  /* this container's own scheme->provider table; env().providers points here */
   std::vector<uint8_t> tail_prog_buf;   /* the tail-continuation slot: "slate.tail" writes the next program's word here */
   bool tail_flag_buf = false;           /* set when a tail hand-off was recorded; the run trampoline reads it */
-  explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), hbits(0), want_device(false) {
+  explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), want_device(false) {
     arena.env().frag_ops  = engine_frag_ops();  /* self-hosting seam: emit/run reach the engine, not a host */
     arena.env().frag_self = this;               /* typed owner back-pointer; emit verifies it matches the arena */
     arena.env().tail_prog = &tail_prog_buf;     /* this container is its own tail target; a tick shares this slot */
@@ -290,11 +289,13 @@ extern "C" const char *slate_dag_channel(SlateDag *b, const char *pin, const cha
  * still agree on what each piece is called, with no message between them. */
 extern "C" const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k) {
   if (!b || (k && !primes)) return "args";
+  const int64_t guard = Slate::rns_pool().second;   /* the pool's reserved check channel — not a pinnable one */
   std::vector<int64_t> ps;
   ps.reserve(k);
   for (uint32_t i = 0; i < k; i++) {
     const int64_t p = primes[i];
     if (p < 2 || p >= ((int64_t)1 << 24)) return "args";        /* outside the width the residue lane carries */
+    if (p == guard || !Slate::is_prime(p)) return "args";       /* the pool's own rule: prime, and not its guard */
     for (uint32_t j = 0; j < i; j++) if (primes[j] == p) return "args";   /* a repeat is a non-squarefree modulus */
     ps.push_back(p);
   }
@@ -335,12 +336,15 @@ extern "C" const char *slate_dag_decomp_cost(SlateDag *b, double narrow, double 
 /* ---- OS-effect surface: grant capabilities, install the host vtable, and build effect nodes. An effect node
  * is resolved to a leaf by effect_eval before dispatch (the floor stays pure); no capability + no host => every
  * effect refuses (a bottom reading), never a wrong value. ---- */
+/* The compose grant, through the C door. Each setter calls the one grant body (effect/eval.hpp) that the
+ * "slate.compose" effect calls too, so a container's sandbox is declared one way whichever door asked. */
 extern "C" const char *slate_dag_effect_caps(SlateDag *b, const char *const *classes, uint32_t n) try {
   if (!b || (!classes && n)) return "args";
-  std::set<std::string> caps;
-  for (uint32_t i = 0; i < n; i++) { if (!classes[i] || !*classes[i]) return "args"; caps.insert(classes[i]); }
-  b->arena.env().effect_caps = std::move(caps);   /* the classes this builder may perform, by name */
-  b->arena.env().config_set |= Slate::Envelope::CFG_CAPS;
+  for (uint32_t i = 0; i < n; i++) if (!classes[i] || !*classes[i]) return "args";   /* check first: a refusal changes nothing */
+  Slate::Envelope &env = b->arena.env();
+  env.effect_caps.clear();                                   /* this call says the whole set, not an addition */
+  for (uint32_t i = 0; i < n; i++) Slate::grant_cap(env, classes[i]);
+  env.config_set |= Slate::Envelope::CFG_CAPS;
   return nullptr;
 } catch (const std::bad_alloc &) { return "nomem"; }
 /* Compose grant, mount a volume: expose the sandbox path `prefix` onto the real host path `real` (Docker's -v).
@@ -348,22 +352,19 @@ extern "C" const char *slate_dag_effect_caps(SlateDag *b, const char *const *cla
  * This is the config paradigm — the same shape as slate_dag_effect_caps — a .slate compose spec drives it. */
 extern "C" const char *slate_dag_mount(SlateDag *b, const char *prefix, const char *real, int writable) {
   if (!b || !prefix || !real) return "args";
-  b->io_policy.mounts.push_back(Slate::IoPolicy::Mount{prefix, real, writable != 0});
-  return nullptr;
+  return Slate::grant_mount(b->arena.env(), prefix, real, writable != 0) ? nullptr : "args";
 }
 /* Compose grant, expose an endpoint: permit a socket provider to reach host:port (Docker's -p). `host` may be null
  * or "" to match any host at that port. `listen` 0 permits a connect (client); nonzero permits a bind (reserved). */
 extern "C" const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int listen) {
-  if (!b || port == 0) return "args";
-  b->io_policy.ports.push_back(Slate::IoPolicy::Port{host ? host : "", port, listen != 0});
-  return nullptr;
+  if (!b) return "args";
+  return Slate::grant_expose(b->arena.env(), host ? host : "", port, listen != 0) ? nullptr : "args";
 }
 /* Compose grant — a tmpfs mount (Docker's --tmpfs): `prefix` is ram-backed, its files living in this container's
  * scoped MemFs (never a host path, never a process global). `writable` 0 makes it read-only. */
 extern "C" const char *slate_dag_tmpfs(SlateDag *b, const char *prefix, int writable) {
   if (!b || !prefix) return "args";
-  b->io_policy.mounts.push_back(Slate::IoPolicy::Mount{prefix, std::string(), writable != 0, /*tmpfs=*/true});
-  return nullptr;
+  return Slate::grant_tmpfs(b->arena.env(), prefix, writable != 0) ? nullptr : "args";
 }
 /* Install the deadline/cancel gate: `proceed(user)` is called at each effect boundary; returning 0 aborts the
  * effect (a clean refusal, not a crash). This is how a wall-clock deadline, a cpu/effect budget, or a cancel of a
@@ -500,7 +501,12 @@ extern "C" void slate_scope_spawn(SlateScope *scope, void (*task)(void *user), v
 
 /* Source-in for a reader: raw bytes as their unsigned value, packed at the min width (int8 for a byte
  * ≤127, int16 for 0-255) with one bulk copy — no int64 vector, no per-value pack. This is the fast
- * text-source path (a reader's source is bytes). */
+ * text-source path (a reader's source is bytes).
+ *
+ * Not the same registration as slate_dag_carrier below: this one packs unsigned byte values (0..255) straight
+ * into a WBuffer by hand for speed; that one hands signed int64 cells to DagBuild::carrier, which builds its
+ * own carrier from the full int64 domain. Different input domains, so this is its own body, not a caller of
+ * that one (or the reverse). */
 static std::shared_ptr<Slate::WBuffer> wbuf_from_bytes(const uint8_t *by, uint64_t n) {
   uint8_t mx = 0;
   for (uint64_t i = 0; i < n; i++) if (by[i] > mx) mx = by[i];
@@ -514,21 +520,28 @@ extern "C" uint32_t slate_dag_carrier_bytes(SlateDag *b, const uint8_t *bytes, u
   if (!b || (!bytes && n)) return UINT32_MAX;
   return b->build.a.lower_register_carrier_buf(wbuf_from_bytes(bytes, n));
 } catch (...) { return UINT32_MAX; }
-extern "C" const char *slate_dag_carrier_set_bytes(SlateDag *b, uint32_t cid, const uint8_t *bytes, uint64_t n) try {
-  if (!b || (!bytes && n)) return "args";
-  b->build.a.lower_set_carrier_buf(cid, wbuf_from_bytes(bytes, n));
-  return nullptr;
-} catch (...) { return "internal"; }
-
 /* The U/E split: replace carrier `cid`'s data in place, then re-run the same construction over the new
  * source with no rebuild and no recompile (the compiled leaf is carrier-independent). This is the fast
- * per-source dispatch — compile the reader once, feed it many sources. */
-extern "C" const char *slate_dag_carrier_set(SlateDag *b, uint32_t cid, const int64_t *vals, uint64_t n) try {
-  if (!b || (!vals && n)) return "args";
-  b->build.a.lower_set_carrier(cid, std::vector<int64_t>(vals, vals + n));
+ * per-source dispatch — compile the reader once, feed it many sources.
+ *
+ * One body, two doors: the guard and the refusal names are the same; the doors differ only in how the new
+ * source is built (raw bytes, or int64 cells). */
+template <class Swap>
+static const char *dag_carrier_swap(SlateDag *b, Swap swap) try {
+  if (!b) return "args";
+  swap();
   return nullptr;
 } catch (const std::bad_alloc &) { return "nomem"; }
   catch (...) { return "internal"; }
+
+extern "C" const char *slate_dag_carrier_set_bytes(SlateDag *b, uint32_t cid, const uint8_t *bytes, uint64_t n) {
+  if (!bytes && n) return "args";
+  return dag_carrier_swap(b, [&] { b->build.a.lower_set_carrier_buf(cid, wbuf_from_bytes(bytes, n)); });
+}
+extern "C" const char *slate_dag_carrier_set(SlateDag *b, uint32_t cid, const int64_t *vals, uint64_t n) {
+  if (!vals && n) return "args";
+  return dag_carrier_swap(b, [&] { b->build.a.lower_set_carrier(cid, std::vector<int64_t>(vals, vals + n)); });
+}
 
 /* Persist / resume: stream the builder's construction over the byte callbacks (wraps Arena::stop/load).
  * stop serializes every node as its word and identity record to `sink` and sheds memory; restore resolves each
@@ -589,6 +602,8 @@ extern "C" const char *slate_dag_node(SlateDag *b, int32_t id, const char **kind
   return nullptr;
 } catch (...) { return "internal"; }
 
+/* Register signed int64 cells as a carrier — see wbuf_from_bytes above for why this is not the same body as
+ * the bytes registration (slate_dag_carrier_bytes): unsigned bytes vs signed int64 cells, two domains. */
 extern "C" uint32_t slate_dag_carrier(SlateDag *b, const int64_t *vals, uint64_t n) try {
   if (!b || b->err || (!vals && n)) { if (b) b->err = true; return UINT32_MAX; }
   return b->build.carrier(std::vector<int64_t>(vals, vals + n));
@@ -599,11 +614,13 @@ extern "C" uint32_t slate_dag_carrier_q(SlateDag *b, const int64_t *nums, uint64
   if (!b || b->err || (!nums && n) || den == 0 || hbits < 0) { if (b) b->err = true; return UINT32_MAX; }
   /* a common-denominator rational operand: cell i = nums[i]/den, folded into residues provisioned to the
    * whole computation's height `hbits` (see WBuffer::rns_rational / bench/gemm_frac.cpp). run() scopes a
-   * Potential to the max hbits so the dispatched result provisions enough channels to Wang-recover num/den. */
+   * Potential to the declared height so the dispatched result provisions enough channels to Wang-recover
+   * num/den. The height a carrier declares is the same axis the Potential knob sets, so it is raised there —
+   * one declared height on the Envelope, not a second copy remembered beside it. */
   auto buf = std::make_shared<Slate::WBuffer>(
       Slate::WBuffer::rns_rational(std::vector<int64_t>(nums, nums + n), den, hbits));
   unsigned cid = b->build.carrier(std::static_pointer_cast<const Slate::WBuffer>(buf));
-  if (hbits > b->hbits) b->hbits = hbits;
+  if ((long long)hbits > b->arena.env().height_bits) b->arena.env().height_bits = (long long)hbits;
   return cid;
 } catch (...) { if (b) b->err = true; return UINT32_MAX; }
 
@@ -695,10 +712,9 @@ struct RunScope {
   std::optional<Slate::Potential> pot;
   explicit RunScope(SlateDag *b) : cs(b->arena) {
     if (b->want_device) dev.emplace();
-    /* the result height is the larger of the caller-declared Potential and the max height the rational (RNS)
-     * carriers need to reconstruct — the output must provision enough channels for both. A pure-int64 build
-     * with no declared Potential leaves this 0 and skips the guard. */
-    long long h = b->hbits > b->arena.env().height_bits ? (long long)b->hbits : b->arena.env().height_bits;
+    /* the result height is the declared Potential — the knob's, raised by any rational (RNS) carrier that needs
+     * more channels to reconstruct. A pure-int64 build with nothing declared leaves this 0 and skips the guard. */
+    long long h = b->arena.env().height_bits;
     if (h > 0) pot.emplace(h);
   }
 };
@@ -709,31 +725,38 @@ static bool run_dims(const int64_t *dims, uint32_t ndims, std::vector<long long>
   return true;
 }
 
-extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
-                                     const int64_t *dims, uint32_t ndims) try {
+/* One body for both dispatch doors: the builder's own scope, the first step, then the trampoline. `root` >= 0
+ * runs that root first; `root` < 0 starts the program the context names — the first step is a hand-off to that
+ * word, and from there it is the same trampoline as a run that handed off. */
+static SlateArray *dag_dispatch(SlateDag *b, int32_t root, const int64_t *dims, uint32_t ndims) {
   std::vector<long long> dv;
-  if (!sd_node_ok(b, root) || !run_dims(dims, ndims, dv)) return nullptr;
+  if (!b || !run_dims(dims, ndims, dv)) return nullptr;
+  if (root < 0 && b->arena.env().program.empty()) return nullptr;   /* no program: nothing to start */
   RunScope scope(b);
-  Slate::ArrayReading ar = run_ticks(b, {}, dv, b->build.run(root, dv));
+  Slate::ArrayReading first;
+  if (root >= 0) {
+    first = b->build.run(root, dv);
+  } else {
+    b->tail_flag_buf = true;                                /* the first step is a hand-off to the configured word */
+    b->tail_prog_buf = b->arena.env().program;
+  }
+  Slate::ArrayReading ar = run_ticks(b, {}, dv, std::move(first));
   if (!ar.buffer()) return nullptr;            /* refused dispatch (non-lowerable / >int64): no wrong value */
   return new SlateArray{std::move(ar)};
+}
+
+extern "C" SlateArray *slate_dag_run(SlateDag *b, int32_t root,
+                                     const int64_t *dims, uint32_t ndims) try {
+  if (!sd_node_ok(b, root)) return nullptr;
+  return dag_dispatch(b, root, dims, ndims);
 } catch (...) {
   return nullptr;
 }
 
-/* start: run the program the context names. The first tick is the configured word; from there it is the same
- * trampoline as a run that handed off. No graph is built here — which row runs is context, set by
+/* start: run the program the context names. No graph is built here — which row runs is context, set by
  * slate_dag_program, the way the lens and the store are. */
 extern "C" SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_t ndims) try {
-  std::vector<long long> dv;
-  if (!b || !run_dims(dims, ndims, dv)) return nullptr;
-  if (b->arena.env().program.empty()) return nullptr;      /* no program: nothing to start */
-  RunScope scope(b);
-  b->tail_flag_buf = true;                                  /* the first tick is a hand-off to the configured word */
-  b->tail_prog_buf = b->arena.env().program;
-  Slate::ArrayReading ar = run_ticks(b, {}, dv, Slate::ArrayReading{});
-  if (!ar.buffer()) return nullptr;
-  return new SlateArray{std::move(ar)};
+  return dag_dispatch(b, -1, dims, ndims);
 } catch (...) {
   return nullptr;
 }
@@ -773,28 +796,33 @@ extern "C" const char *slate_array_receipt(const SlateArray *a, const slate_entr
   return nullptr;
 } catch (...) { return "internal"; }
 
+/* The int64 readback, one body: a reading is a sign and two binaries; this reads that pair back as int64 or
+   refuses by name. INT64_MIN = -2^63: its magnitude sits at the wide-value ceiling and has no positive int64
+   form, yet the signed output holds it — so it is handed back directly (never -(int64_t)2^63, which is
+   undefined). Anything wider refuses rather than reading a wrong value. Every door that pulls an int64 out of
+   a reading (the array door, the search door) comes here. */
+static const char *reading_i64(const Slate::Receipt &r, int64_t *num, int64_t *den) {
+  if (!r.has_value()) return "refused";
+  const uint64_t TOP = (uint64_t)1 << 63;
+  if (r.num.size() > 1 || r.den.size() > 1) return "wide";
+  uint64_t nmag = r.num.empty() ? 0 : r.num[0];
+  uint64_t dmag = r.den.empty() ? 1 : r.den[0];
+  if (r.sign && nmag == TOP && dmag == 1) { *num = INT64_MIN; *den = 1; return nullptr; }
+  if (nmag >= TOP || dmag >= TOP) return "wide";
+  int64_t nn = (int64_t)nmag;
+  *num = r.sign ? -nn : nn;
+  *den = (int64_t)(dmag ? dmag : 1);
+  return nullptr;
+}
+
 /* Unsafe per-cell int64 pull: reconstructs a value per cell and drops the receipt (the line-by-line
  * anti-pattern). Prefer slate_array_receipt + keeping the result resident; extract a final answer in bulk
  * via slate_array_records. Kept for host FFIs that genuinely need a raw int lane. */
 extern "C" const char *slate_array_i64_unsafe(const SlateArray *a, int64_t *num, int64_t *den) try {
   if (!a || !num || !den) return "args";
   const size_t n = a->ar.size();
-  const uint64_t TOP = (uint64_t)1 << 63;
-  for (size_t i = 0; i < n; i++) {
-    Slate::Receipt r = a->ar.cell(i);
-    if (!r.has_value()) return "refused";
-    if (r.num.size() > 1 || r.den.size() > 1) return "wide";
-    uint64_t nmag = r.num.empty() ? 0 : r.num[0];
-    uint64_t dmag = r.den.empty() ? 1 : r.den[0];
-    /* INT64_MIN = -2^63: its magnitude 2^63 sits at the wide-value ceiling and has no positive int64 form,
-       yet the signed output can still hold it. Emit it directly (never -(int64_t)2^63, which is undefined) so
-       a carried INT64_MIN reads back exactly rather than tripping the wide-magnitude guard below. */
-    if (r.sign && nmag == TOP && dmag == 1) { num[i] = INT64_MIN; den[i] = 1; continue; }
-    if (nmag >= TOP || dmag >= TOP) return "wide";
-    int64_t nn = (int64_t)nmag;
-    num[i] = r.sign ? -nn : nn;
-    den[i] = (int64_t)(dmag ? dmag : 1);
-  }
+  for (size_t i = 0; i < n; i++)
+    if (const char *e = reading_i64(a->ar.cell(i), num + i, den + i)) return e;
   return nullptr;
 } catch (const std::bad_alloc &) { return "nomem"; }
   catch (...) { return "internal"; }
@@ -907,17 +935,19 @@ struct FragCarrier {
 #if defined(__ARM_FEATURE_CRC32)
 #include <arm_acle.h>
 #endif
+/* the polynomial's 256 steps — a true constant of the poly, not a remembered computation: built at compile
+   time, so nothing is computed once and held across calls. */
 struct FragCrcTable {
-  uint32_t T[256];
-  FragCrcTable() { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i;
+  uint32_t T[256] = {};
+  constexpr FragCrcTable() { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i;
       for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(c & 1))); T[i] = c; } }
 };
+inline constexpr FragCrcTable kFragCrcTable{};
 inline uint32_t frag_crc32_update(uint32_t c, const uint8_t *p, size_t n) {
 #if defined(__ARM_FEATURE_CRC32)
   while (n >= 8) { uint64_t v; std::memcpy(&v, p, 8); c = __crc32d(c, v); p += 8; n -= 8; }   /* hardware, 8B/step */
 #endif
-  static const FragCrcTable tab;
-  for (size_t i = 0; i < n; i++) c = tab.T[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
+  for (size_t i = 0; i < n; i++) c = kFragCrcTable.T[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
   return c;
 }
 inline uint32_t frag_crc32(const uint8_t *p, size_t n) { return frag_crc32_update(0xFFFFFFFFu, p, n) ^ 0xFFFFFFFFu; }
@@ -988,7 +1018,7 @@ extern "C" const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const 
      ensure_carrier registers recursively (an io operand may itself be an io out carrier: a composite in one file). */
   const auto &cs = b->arena.lower_carriers();
   std::vector<int32_t> ctab(cs.size(), -1);
-  uint32_t fragPot = (uint32_t)(b->hbits > b->arena.env().height_bits ? b->hbits : b->arena.env().height_bits);
+  uint32_t fragPot = (uint32_t)b->arena.env().height_bits;   /* the declared height, the one the Envelope holds */
   std::vector<FragCarrier> carriers;
   std::vector<FragEffectArray> effect_arrays;
   bool cerr = false;
@@ -1331,7 +1361,6 @@ extern "C" const char *slate_dag_splice(SlateDag *b, const SlateFrag *f, const u
   /* typecheck every hole before mutating b, so a refusal leaves the builder untouched (atomic). */
   for (const auto &fc : f->carriers) {
     if (!fc.is_hole) continue;
-    if (!fc.is_hole) continue;
     uint32_t supplied = arg_carriers[(size_t)fc.hole_rank];
     if (supplied >= cs.size() || !cs[supplied]) return "args";
     int sdom = cs[supplied]->is_rns() ? 2 : 1;
@@ -1502,20 +1531,14 @@ extern "C" const char *slate_dag_search(SlateDag *b, int32_t root, uint64_t pote
     uint32_t n = (uint32_t)r.at.size() < cap ? (uint32_t)r.at.size() : cap;
     for (uint32_t i = 0; i < n; i++) out[i] = r.at[i];
   }
-  /* Decode the settled value → num/den, mirroring the slate_array_i64_unsafe wide path exactly: a
-     refused/undefined fold sets *out_undef=1 (OK, no value); a value past int64 returns EWIDE (never a wrong
-     answer); INT64_MIN passes through directly since -(int64)2^63 is UB. */
+  /* Decode the settled value → num/den through the one int64 readback: a refused/undefined fold sets
+     *out_undef=1 (OK, no value); a value past int64 returns EWIDE (never a wrong answer). */
   Slate::Receipt rd = r.value.to_reading();
   if (!rd.has_value()) { if (out_undef) *out_undef = 1; return nullptr; }
-  const uint64_t TOP = (uint64_t)1 << 63;
-  if (rd.num.size() > 1 || rd.den.size() > 1) return "wide";
-  uint64_t nmag = rd.num.empty() ? 0 : rd.num[0];
-  uint64_t dmag = rd.den.empty() ? 1 : rd.den[0];
-  if (rd.sign && nmag == TOP && dmag == 1) { if (out_num) *out_num = INT64_MIN; if (out_den) *out_den = 1; return nullptr; }
-  if (nmag >= TOP || dmag >= TOP) return "wide";
-  int64_t nn = (int64_t)nmag;
-  if (out_num) *out_num = rd.sign ? -nn : nn;
-  if (out_den) *out_den = (int64_t)(dmag ? dmag : 1);
+  int64_t vn = 0, vd = 1;
+  if (const char *e = reading_i64(rd, &vn, &vd)) return e;
+  if (out_num) *out_num = vn;
+  if (out_den) *out_den = vd;
   return nullptr;
 } catch (...) { return "internal"; }
 
@@ -1602,7 +1625,9 @@ static int frag_perform_impl(Slate::Arena &cx, const char *cls, const uint8_t *b
 
 static const Slate::FragOps *engine_frag_ops() {
   /* emit via perform; a run composes via splice (append into this graph) — the pre-pass forces it forward, so a
-   * self-hosting run is one flat forward evaluation, never a nested dispatch on the native stack. run() is unused. */
-  static const Slate::FragOps ops = { frag_emit_impl, nullptr /*run*/, frag_perform_impl, frag_splice_impl };
+   * self-hosting run is one flat forward evaluation, never a nested dispatch on the native stack. The seam's own
+   * `run` slot is left unwired: splice is the one body a run goes through. */
+  static const Slate::FragOps ops = { .emit = frag_emit_impl, .perform = frag_perform_impl,
+                                      .splice = frag_splice_impl };
   return &ops;
 }

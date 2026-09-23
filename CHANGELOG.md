@@ -2,6 +2,14 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.6.0
+
+- `slate_dag_lens` refuses a pinned prime that is not prime, not distinct, outside the pool's range or the
+  guard, with the engine's own `is_prime` — the C door's rule is the pool's rule (refusal `"args"`).
+- One body each for the two dispatch doors, the two carrier-swap doors and the int64 readback; the pasted dead
+  branch and the unwired `FragOps::run` slot are gone. The CRC table is a compile-time constant. The declared
+  height lives on the Envelope's `height_bits` only; `carrier_q` raises it there. Exported C symbols unchanged.
+
 ## 0.5.0
 
 - **`slate_dag_shares`.** The primes set by `slate_dag_lens` divide into shares a run spreads over. The tail

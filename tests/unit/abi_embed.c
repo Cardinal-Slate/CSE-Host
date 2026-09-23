@@ -222,13 +222,15 @@ int main(void) {
     const int64_t too_big[1] = { (int64_t)1 << 24 };
     const int64_t dup[2] = { 1000003, 1000003 };
     const int64_t one[1] = { 1000003 };
+    const int64_t nonprime[1] = { 1000001 };   /* 101 * 9901: composite, in range, not a repeat */
     CHECK(slate_dag_lens(g, too_big, 1) != NULL, "6: a prime past the lane's width was accepted");
     CHECK(slate_dag_lens(g, dup, 2) != NULL, "6: a repeated prime was accepted");
     CHECK(slate_dag_lens(g, NULL, 2) != NULL, "6: a null share with k>0 was accepted");
     CHECK(slate_dag_lens(NULL, one, 1) != NULL, "6: a null builder was accepted");
+    CHECK(slate_refused(slate_dag_lens(g, nonprime, 1), "args"), "6: a non-prime was accepted");
     CHECK(slate_dag_lens(g, NULL, 0) == NULL, "6: unpinning was refused");
     slate_dag_free(g);
-    printf("  lens: a prime past the lane's width, a repeat, and a null share are each refused\n");
+    printf("  lens: a prime past the lane's width, a repeat, a null share, and a non-prime are each refused\n");
   }
 
   /* ---- 7. a program is a row: emit names it, run and tail take the name, a name the store lacks refuses ---- */
