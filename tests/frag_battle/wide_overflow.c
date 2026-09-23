@@ -15,24 +15,11 @@
 #include <string.h>
 #include <inttypes.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
-/* growable memory sink + cursor source (same pattern as frag_cabi.c) */
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
 /* the text of a reading entry, for printing (a utf8 entry's bytes are a C string) */
 static const char *ent(const slate_entry *e, int32_t n, const char *name) {
   const slate_entry *f = slate_entry_find(e, n, name); return f ? (const char *)f->bytes : "-";
-}
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
 }
 
 static int fails = 0;
@@ -65,8 +52,8 @@ static int decode_cell(const uint64_t *rec, uint64_t stride, uint64_t i,
 }
 
 /* Build a fragment root[i] = A[i]*B[i] with A,B as holes; serialize to `out`. */
-static void build_product_fragment(MemSink *out, uint64_t n) {
-  SlateDag *b = slate_dag_new();
+static void build_product_fragment(MsProg *out, uint64_t n) {
+  SlateDag *b = ms_dag();
   int64_t *ph = (int64_t *)calloc(n, sizeof(int64_t));   /* placeholder data to build+typecheck once */
   uint32_t cidA = slate_dag_carrier(b, ph, n);
   uint32_t cidB = slate_dag_carrier(b, ph, n);
@@ -75,7 +62,7 @@ static void build_product_fragment(MemSink *out, uint64_t n) {
   int32_t lB = slate_dag_load(b, cidB, p);
   int32_t root = slate_dag_mul(b, lA, lB);
   uint32_t holes[2] = {cidA, cidB};
-  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, out);
+  const char *rc = ms_keep(b, root, holes, 2, out);
   CHECK(rc == NULL, "save 2-hole product fragment");
   slate_dag_free(b);
   free(ph);
@@ -97,17 +84,16 @@ int main(void) {
   /* sanity: confirm my inputs really do overflow int64 */
   for (int i = 0; i < 4; i++) CHECK(expect[i] > (u128)INT64_MAX, "hand product exceeds int64");
 
-  MemSink frag = {0};
+  MsProg frag = {0};
   build_product_fragment(&frag, N);
-  CHECK(frag.len > 0, "fragment bytes nonempty");
+  CHECK(frag.pn > 0, "fragment bytes nonempty");
 
   int64_t dims[1] = { (int64_t)N };
 
   /* -------- (1) run without a Potential set: observe refuse vs produce -------- */
   int no_potential_produced = 0;
   {
-    MemSrc src = {frag.buf, frag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&frag);
     CHECK(f != NULL, "frag load (no-potential run)");
     SlateDag *b = slate_dag_new();
     uint32_t cA = slate_dag_carrier(b, A, N);
@@ -132,8 +118,7 @@ int main(void) {
 
   /* -------- (2)+(3)+(4) run with a large Potential: produce, EWIDE, exact records -------- */
   {
-    MemSrc src = {frag.buf, frag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&frag);
     SlateDag *b = slate_dag_new();
     const char *prc = slate_dag_potential(b, 128);          /* 128-bit ceiling >> ~66-bit products */
     CHECK(prc == NULL, "slate_dag_potential(128) ok");
@@ -194,8 +179,7 @@ int main(void) {
 
   /* -------- (5a) Potential far larger than needed: still exact (over-provision is safe) -------- */
   {
-    MemSrc src = {frag.buf, frag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&frag);
     SlateDag *b = slate_dag_new();
     slate_dag_potential(b, 512);
     uint32_t cA = slate_dag_carrier(b, A, N);
@@ -299,7 +283,7 @@ int main(void) {
     slate_dag_free(b);
   }
 
-  free(frag.buf);
+  ms_prog_free(&frag);
   printf(no_potential_produced ? "(note: no-Potential run auto-provisioned)\n"
                                : "(note: no-Potential run refused)\n");
   if (fails == 0) printf("PASS wide_overflow: all wide/EWIDE/records/Potential checks\n");

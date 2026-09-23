@@ -2,7 +2,7 @@
 
 The C ABI and the composition root.
 
-`array.h` (the front door as opaque handles, fragments, splice, stop/restore, `slate_dag_codec`), `number.h`, `reals.h`, and `engine_cabi.cpp`, which binds one platform, one codegen, and the linked backends.
+`array.h` (the front door as opaque handles, fragments kept as leaves and loaded by name, splice, `slate_dag_codec`), `number.h`, `reals.h`, and `engine_cabi.cpp`, which binds one platform, one codegen, and the linked backends.
 
 **Depends on:** everything
 

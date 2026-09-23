@@ -13,21 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
 /* ---- a growable memory sink and a cursor source over the same bytes ---- */
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
-}
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL rational_holes: %s\n", msg); fails++; } \
@@ -59,8 +47,8 @@ static int record_cell0(SlateArray *a, int64_t *num_out, int64_t *den_out) {
 }
 
 /* Build the Q-hole sum fragment: root = A[0]+A[1]+A[2], A a Q hole. Returns serialized bytes. */
-static MemSink build_q_sum_fragment(void) {
-  SlateDag *b = slate_dag_new();
+static MsProg build_q_sum_fragment(void) {
+  SlateDag *b = ms_dag();
   /* placeholder Q data so the hole builds+typechecks once: 1/4, 3/4, 5/4 (den shared = 4) */
   int64_t nums[3] = {1, 3, 5};
   uint32_t cidA = slate_dag_carrier_q(b, nums, 3, /*den=*/4, /*hbits=*/64);
@@ -69,23 +57,23 @@ static MemSink build_q_sum_fragment(void) {
                 slate_dag_add(b, slate_dag_load(b, cidA, slate_dag_lit(b, 0)),
                                  slate_dag_load(b, cidA, slate_dag_lit(b, 1))),
                 slate_dag_load(b, cidA, slate_dag_lit(b, 2)));
-  MemSink out = {0};
+  MsProg out = {0};
   uint32_t holes[1] = {cidA};
-  const char *rc = slate_dag_save_fragment(b, s, holes, 1, mem_sink, &out);
+  const char *rc = ms_keep(b, s, holes, 1, &out);
   CHECK(rc == NULL, "save Q-sum fragment");
   slate_dag_free(b);
   return out;
 }
 
 /* Build a Z-hole fragment: root = A[0], A a plain int (Z) hole. Returns serialized bytes. */
-static MemSink build_z_fragment(void) {
-  SlateDag *b = slate_dag_new();
+static MsProg build_z_fragment(void) {
+  SlateDag *b = ms_dag();
   int64_t placeholder[3] = {0, 0, 0};
   uint32_t cid = slate_dag_carrier(b, placeholder, 3);
   int32_t root = slate_dag_load(b, cid, slate_dag_lit(b, 0));
-  MemSink out = {0};
+  MsProg out = {0};
   uint32_t holes[1] = {cid};
-  const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &out);
+  const char *rc = ms_keep(b, root, holes, 1, &out);
   CHECK(rc == NULL, "save Z hole fragment");
   slate_dag_free(b);
   return out;
@@ -94,13 +82,12 @@ static MemSink build_z_fragment(void) {
 int main(void) {
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  MemSink qfrag = build_q_sum_fragment();
-  CHECK(qfrag.len > 0, "Q fragment serialized nonempty");
+  MsProg qfrag = build_q_sum_fragment();
+  CHECK(qfrag.pn > 0, "Q fragment serialized nonempty");
 
   /* ---- iface: 1 hole, hole domain must be Q; the root iface domain is derive ---- */
   {
-    MemSrc src = {qfrag.buf, qfrag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&qfrag);
     CHECK(f != NULL, "load Q fragment ok");
     if (f) {
       uint32_t np = 0, nh = 0;
@@ -122,8 +109,7 @@ int main(void) {
 
   /* ---- Splice a real Q carrier + run: sum(1/4,3/4,5/4) = 9/4 ---- */
   {
-    MemSrc src = {qfrag.buf, qfrag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&qfrag);
     SlateDag *b = slate_dag_new();
     int64_t nums[3] = {1, 3, 5};
     uint32_t cidA = slate_dag_carrier_q(b, nums, 3, 4, 64);
@@ -152,8 +138,7 @@ int main(void) {
 
   /* ---- Typecheck (allowed): a plain Z carrier into the Q hole (Z ⊂ Q) ---- */
   {
-    MemSrc src = {qfrag.buf, qfrag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&qfrag);
     SlateDag *b = slate_dag_new();
     int64_t zvals[3] = {2, 4, 6};                 /* plain integers */
     uint32_t cidZ = slate_dag_carrier(b, zvals, 3);
@@ -179,16 +164,15 @@ int main(void) {
 
   /* ---- Typecheck (refused): a Q carrier into a Z hole must refuse with -EREFUSED (Q not sub Z) ---- */
   {
-    MemSink zfrag = build_z_fragment();
+    MsProg zfrag = build_z_fragment();
     /* sanity: the Z fragment's hole domain is really Z */
-    { MemSrc s = {zfrag.buf, zfrag.len, 0}; SlateFrag *zf = slate_frag_load(mem_src, &s);
+    { SlateFrag *zf = ms_load(&zfrag);
       if (zf) { slate_hole hp[1]; uint32_t cap = 1;
         if (slate_frag_iface(zf, NULL, hp, &cap, NULL) == NULL)
           CHECK(strcmp(hp[0].receipt.domain, "Z") == 0, "Z fragment hole domain == Z");
         slate_frag_free(zf); } }
 
-    MemSrc src = {zfrag.buf, zfrag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&zfrag);
     SlateDag *b = slate_dag_new();
     int64_t nums[3] = {1, 3, 5};
     uint32_t cidQ = slate_dag_carrier_q(b, nums, 3, 4, 64);   /* a real Q carrier */
@@ -199,10 +183,10 @@ int main(void) {
       printf("  (got splice rc=%s, expected \"refused\")\n", rc ? rc : "NULL");
     slate_dag_free(b);
     slate_frag_free(f);
-    free(zfrag.buf);
+    ms_prog_free(&zfrag);
   }
 
-  free(qfrag.buf);
+  ms_prog_free(&qfrag);
   if (fails == 0) printf("PASS rational_holes: all Q-hole domain-typing checks\n");
   return fails ? 1 : 0;
 }

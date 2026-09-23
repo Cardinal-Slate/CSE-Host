@@ -1,8 +1,10 @@
-/* Adversarial fuzz of the .slate fragment untrusted-bytes decoder (slate_frag_load).
+/* Adversarial fuzz of the fragment decoder (slate_frag_load) against an untrusted store.
  *
- * Serialize one valid fragment  root[i] = A[i]*2 + C[i]  (A a hole, C baked {10,20,30,40}), then mutate
- * the byte buffer and feed every corrupted stream to slate_frag_load. Invariant under test: load must
- * neither crash nor hand back a fragment that, spliced and run, yields a wrong value; it either rejects
+ * Keep one valid fragment  root[i] = A[i]*2 + C[i]  (A a hole, C baked {10,20,30,40}) as a leaf, then mutate
+ * the bytes the store hands back for that leaf's cells and load it by name every time. There is no file to
+ * corrupt any more: a program is a leaf, so the only thing that can lie to a load is the store it reads from,
+ * and that is what is fuzzed here — one cell of a leaf is one byte of the program. Invariant under test: load
+ * must neither crash nor hand back a fragment that, spliced and run, yields a wrong value; it either rejects
  * (NULL) or loads to a fragment that runs to an exact value.
  *
  * Each candidate is loaded (and, if accepted, spliced and run) in a forked child under an address-space
@@ -26,27 +28,19 @@
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
-}
 static uint32_t T[256];
 static void crc_init(void){ for(uint32_t i=0;i<256;i++){uint32_t c=i;for(int k=0;k<8;k++)c=(c>>1)^(0xEDB88320u&(uint32_t)(-(int32_t)(c&1)));T[i]=c;} }
 static uint32_t crc_calc(const uint8_t*p,size_t n){uint32_t c=0xFFFFFFFFu;for(size_t i=0;i<n;i++)c=T[(c^p[i])&0xFF]^(c>>8);return c^0xFFFFFFFFu;}
 
 static const int64_t ORIG[4] = {12, 24, 36, 48};
 
-/* Child-side: load candidate, and if accepted splice and run. Exit codes:
+/* the leaf being fuzzed: its name, and the bytes it was kept with */
+static MsProg g_frag;
+
+/* Child-side: make the store hand back the candidate bytes, load by name, and if accepted splice and run.
+ * Exit codes:
  *   0  rejected (NULL) -- the safe outcome
  *   10 accepted, ran to the correct values (regime A: original values; regime B: defined tower domain)
  *   11 accepted, wrong value / bad domain (a decoder bug)
@@ -65,8 +59,9 @@ static int eager_alloc_screen(const unsigned char *buf, size_t len) {
 static int child_run(const unsigned char *buf, size_t len, int enforce_orig) {
   int scr = eager_alloc_screen(buf, len);
   if (scr) return scr;
-  MemSrc s = {buf, len, 0};
-  SlateFrag *f = slate_frag_load(mem_src, &s);
+  ms_leaf_write(&ms_store, buf, len);        /* the store now hands back these bytes for this leaf's cells */
+  MsProg cand = g_frag; cand.pn = len;       /* the name, with the count the candidate claims */
+  SlateFrag *f = ms_load(&cand);
   if (!f) return 0;
   uint32_t nparams = 0, nholes = 0;
   if (slate_frag_iface(f, &nparams, NULL, &nholes, NULL) != NULL) { slate_frag_free(f); return 12; }
@@ -138,25 +133,28 @@ int main(void) {
   setvbuf(stdout, NULL, _IONBF, 0);
   crc_init();
 
-  /* baseline valid fragment */
-  MemSink frag = {0};
+  /* baseline valid fragment, kept as a leaf in a table that holds nothing else — so the table's put order is
+     exactly this leaf's cells, cell 0 first, and the fuzz can read and rewrite them by index */
   {
-    SlateDag *b = slate_dag_new();
+    SlateDag *b = ms_dag();
     int64_t A[4]={0,0,0,0}, C[4]={10,20,30,40};
     uint32_t cidA=slate_dag_carrier(b,A,4), cidC=slate_dag_carrier(b,C,4);
     int32_t p=slate_dag_param(b,0);
     int32_t root=slate_dag_add(b, slate_dag_mul(b, slate_dag_load(b,cidA,p), slate_dag_lit(b,2)), slate_dag_load(b,cidC,p));
     uint32_t holes[1]={cidA};
-    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &frag);
+    const char *rc = ms_keep(b, root, holes, 1, &g_frag);
     if (rc != NULL) { printf("FAIL: save_fragment rc=%s\n", rc); return 2; }
     slate_dag_free(b);
   }
-  size_t LEN = frag.len;
-  printf("fragment length = %zu bytes\n", LEN);
+  size_t LEN = (size_t)g_frag.pn;
+  printf("fragment length = %zu bytes (%zu rows in the table)\n", LEN, ms_store.rows);
+
+  unsigned char *base = (unsigned char *)malloc(LEN + 64);
+  if (!ms_leaf_read(&ms_store, LEN, base)) { printf("FAIL: the leaf's cells are not byte cells\n"); return 2; }
 
   /* baseline must load+run to {12,24,36,48} in-process (proves the harness) */
   {
-    MemSrc s={frag.buf,LEN,0}; SlateFrag*f=slate_frag_load(mem_src,&s);
+    SlateFrag *f = ms_load(&g_frag);
     if(!f){printf("FAIL: baseline load NULL\n"); return 2;}
     SlateDag*b=slate_dag_new(); int64_t A[4]={1,2,3,4}; uint32_t ca=slate_dag_carrier(b,A,4);
     int32_t r = -1; slate_dag_splice(b,f,&ca,1, &r); int64_t dims[1]={4}; SlateArray*a=slate_dag_run(b,r,dims,1);
@@ -164,8 +162,8 @@ int main(void) {
     if(!(num[0]==12&&num[1]==24&&num[2]==36&&num[3]==48)){printf("FAIL: baseline values %lld,%lld,%lld,%lld\n",(long long)num[0],(long long)num[1],(long long)num[2],(long long)num[3]);return 2;}
     printf("baseline OK: {12,24,36,48}\n");
     slate_array_free(a); slate_dag_free(b); slate_frag_free(f);
-    uint32_t stored; memcpy(&stored,frag.buf+LEN-4,4);
-    if(crc_calc(frag.buf,LEN-4)!=stored){printf("FAIL: harness crc mismatch\n");return 2;}
+    uint32_t stored; memcpy(&stored,base+LEN-4,4);
+    if(crc_calc(base,LEN-4)!=stored){printf("FAIL: harness crc mismatch\n");return 2;}
     printf("harness crc32 matches engine\n");
   }
 
@@ -175,19 +173,19 @@ int main(void) {
   const unsigned char xm[3] = {0xFF, 0x01, 0x80};
   for (size_t off = 0; off < LEN; off++) {
     for (int pi = 0; pi < 3; pi++) {
-      memcpy(mut, frag.buf, LEN); mut[off]^=xm[pi];
+      memcpy(mut, base, LEN); mut[off]^=xm[pi];
       char tag[64]; snprintf(tag,sizeof tag,"A.xor off=%zu m=0x%02x",off,xm[pi]);
       evaluate(mut, LEN, 1, tag);
     }
-    for (int v=0; v<2; v++) { unsigned char nv=v?0xFF:0x00; if(frag.buf[off]==nv)continue;
-      memcpy(mut,frag.buf,LEN); mut[off]=nv;
+    for (int v=0; v<2; v++) { unsigned char nv=v?0xFF:0x00; if(base[off]==nv)continue;
+      memcpy(mut,base,LEN); mut[off]=nv;
       char tag[64]; snprintf(tag,sizeof tag,"A.set off=%zu v=0x%02x",off,nv);
       evaluate(mut, LEN, 1, tag);
     }
   }
   srand(0xC0FFEE);
   for (int it=0; it<2500; it++) {
-    memcpy(mut,frag.buf,LEN); int nb=2+(rand()%5);
+    memcpy(mut,base,LEN); int nb=2+(rand()%5);
     for(int k=0;k<nb;k++){size_t o=(size_t)(rand()%(int)LEN); mut[o]=(unsigned char)(rand()&0xFF);}
     char tag[48]; snprintf(tag,sizeof tag,"A.multi it=%d",it);
     evaluate(mut, LEN, 1, tag);
@@ -199,11 +197,13 @@ int main(void) {
   long a_reject=n_reject,a_exact=n_exact,a_refuse=n_refuse,a_wrong=n_wrong,a_crash=n_crash,a_dos=n_dos;
 
   /* ---------------- Regime B: crc-consistent header/count probes ---------------- */
-  uint64_t H[8]; memcpy(H,frag.buf,64);
-  uint64_t real_ninstr=H[3], real_ncarrier=H[6];
-  size_t baked_len_off = 64 + 32 + (size_t)real_ncarrier*16 + (size_t)real_ninstr*24;
+  /* the head of the bytes is five counts — ninstr, root, nparams, ncarrier, potential — and nothing in front
+     of them: the store's word already says what the bytes are, so they carry no marker of their own. */
+  uint64_t H[5]; memcpy(H,base,40);
+  uint64_t real_ninstr=H[0], real_ncarrier=H[3];
+  size_t baked_len_off = 40 + 32 + (size_t)real_ncarrier*16 + (size_t)real_ninstr*24;
   struct { const char*name; size_t off; } fields[] = {
-    {"ninstr",24},{"root",32},{"nparams",40},{"ncarrier",48},{"pot",56},{"baked_len",baked_len_off},
+    {"ninstr",0},{"root",8},{"nparams",16},{"ncarrier",24},{"pot",32},{"baked_len",baked_len_off},
   };
   uint64_t probes[] = {
     0,1,2,3,4,5, real_ninstr, real_ninstr-1, real_ninstr+1, real_ncarrier, real_ncarrier+1,
@@ -214,7 +214,7 @@ int main(void) {
   for (size_t fi=0; fi<sizeof fields/sizeof fields[0]; fi++) {
     if (fields[fi].off+8 > LEN) continue;
     for (size_t pj=0; pj<sizeof probes/sizeof probes[0]; pj++) {
-      memcpy(mut,frag.buf,LEN); memcpy(mut+fields[fi].off,&probes[pj],8);
+      memcpy(mut,base,LEN); memcpy(mut+fields[fi].off,&probes[pj],8);
       uint32_t c=crc_calc(mut,LEN-4); memcpy(mut+LEN-4,&c,4);
       char tag[80]; snprintf(tag,sizeof tag,"B.%s=0x%llx",fields[fi].name,(unsigned long long)probes[pj]);
       evaluate(mut, LEN, 0, tag);
@@ -222,7 +222,7 @@ int main(void) {
   }
   /* truncation at every boundary, crc recomputed for the truncated span */
   for (size_t tl=12; tl<LEN; tl++) {
-    memcpy(mut,frag.buf,tl);
+    memcpy(mut,base,tl);
     if (tl>=4){uint32_t c=crc_calc(mut,tl-4); memcpy(mut+tl-4,&c,4);}
     char tag[48]; snprintf(tag,sizeof tag,"B.trunc len=%zu",tl);
     evaluate(mut, tl, 0, tag);
@@ -233,7 +233,7 @@ int main(void) {
   printf("REGIME B done: total=%ld reject=%ld exact=%ld refuse=%ld wrong=%ld segv=%ld dos=%ld\n",
          b_total,b_reject,b_exact,b_refuse,b_wrong,b_crash,b_dos);
 
-  free(mut); free(frag.buf);
+  free(mut); free(base); ms_prog_free(&g_frag); ms_free(&ms_store);
   printf("SUMMARY: A_muts=%ld B_muts=%ld  SEGV=%ld WRONG=%ld DoS=%ld  (reject=%ld exact=%ld refuse=%ld)\n",
          a_total,b_total,n_crash,n_wrong,n_dos,n_reject,n_exact,n_refuse);
   printf("NOTE: DoS=%ld — the loader now reads counts incrementally (bounded reserve + <=8MB grow steps), so a\n"

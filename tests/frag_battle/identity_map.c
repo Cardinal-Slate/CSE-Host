@@ -9,21 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
 /* growable memory sink + cursor source over the same bytes (the frag_cabi pattern) */
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
-}
 
 static int fails = 0;
 #define CHECK(cond, msg) do { \
@@ -36,9 +24,9 @@ int main(void) {
   setvbuf(stdout, NULL, _IONBF, 0);
 
   /* ---- Build: root = load(A, param0). No add/mul/anything. A is the sole hole. ---- */
-  MemSink frag = {0};
+  MsProg frag = {0};
   {
-    SlateDag *b = slate_dag_new();
+    SlateDag *b = ms_dag();
     CHECK(b != NULL, "slate_dag_new builder allocated");
     int64_t placeholderA[N] = {0, 0, 0, 0};          /* a hole still needs data to typecheck once */
     uint32_t cidA = slate_dag_carrier(b, placeholderA, N);
@@ -47,16 +35,15 @@ int main(void) {
     int32_t root = slate_dag_load(b, cidA, p);        /* the entire graph: one load, zero ops */
     CHECK(root >= 0, "load node id valid (root is a bare load)");
     uint32_t holes[1] = {cidA};
-    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &frag);
+    const char *rc = ms_keep(b, root, holes, 1, &frag);
     CHECK(rc == NULL, "save_fragment ok (zero-op fragment)");
     slate_dag_free(b);
   }
-  CHECK(frag.len > 0, "fragment serialized nonempty");
+  CHECK(frag.pn > 0, "fragment serialized nonempty");
 
   /* ---- Load + iface: must report exactly 1 param and 1 hole ---- */
   {
-    MemSrc src = {frag.buf, frag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&frag);
     CHECK(f != NULL, "frag_load ok");
     if (f) {
       uint32_t np = 999, nh = 999;
@@ -79,8 +66,7 @@ int main(void) {
   /* ---- Splice + run: wire real A = {5,-3,7,0} into the hole, run over grid[4] ---- */
   {
     const int64_t A[N] = {5, -3, 7, 0};               /* negative and zero cells on purpose */
-    MemSrc src = {frag.buf, frag.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&frag);
     CHECK(f != NULL, "frag_load ok (for splice)");
     if (f) {
       SlateDag *b = slate_dag_new();

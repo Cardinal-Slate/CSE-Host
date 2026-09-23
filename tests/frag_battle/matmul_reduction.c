@@ -13,24 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
-/* ---- growable memory sink + cursor source over the same bytes ---- */
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
 /* the text of a reading entry, for printing (a utf8 entry's bytes are a C string) */
 static const char *ent(const slate_entry *e, int32_t n, const char *name) {
   const slate_entry *f = slate_entry_find(e, n, name); return f ? (const char *)f->bytes : "-";
-}
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
 }
 
 static int fails = 0;
@@ -38,8 +25,8 @@ static int fails = 0;
 
 /* Build the reduce-matmul over holes A,B for shape M,K,D. placeholderA/placeholderB give the holes the
  * bytes they need to build+typecheck once. Returns serialized fragment bytes; *pnholes gets the hole count. */
-static MemSink build_matmul_fragment(int M, int K, int D) {
-  SlateDag *b = slate_dag_new();
+static MsProg build_matmul_fragment(int M, int K, int D) {
+  SlateDag *b = ms_dag();
   int64_t *phA = (int64_t *)calloc((size_t)M * K, sizeof(int64_t));
   int64_t *phB = (int64_t *)calloc((size_t)K * D, sizeof(int64_t));
   uint32_t cA = slate_dag_carrier(b, phA, (uint64_t)M * K);
@@ -55,9 +42,9 @@ static MemSink build_matmul_fragment(int M, int K, int D) {
     int32_t prod = slate_dag_mul(b, slate_dag_load(b, cA, idxA), slate_dag_load(b, cB, idxB));
     root = (root < 0) ? prod : slate_dag_add(b, root, prod);
   }
-  MemSink out = {0};
+  MsProg out = {0};
   uint32_t holes[2] = {cA, cB};   /* both operands unbound; nothing baked */
-  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
+  const char *rc = ms_keep(b, root, holes, 2, &out);
   CHECK(rc == NULL, "save_fragment ok (2 holes)");
   slate_dag_free(b);
   free(phA); free(phB);
@@ -75,10 +62,9 @@ static void ref_matmul(const int64_t *A, const int64_t *B, int64_t *C, int M, in
 }
 
 /* Load the fragment, splice with real A,B, dispatch over {M,D}, verify every cell against ref_matmul. */
-static void splice_run_verify(const MemSink *frag, const int64_t *A, const int64_t *B,
+static void splice_run_verify(const MsProg *frag, const int64_t *A, const int64_t *B,
                               int M, int K, int D, const char *what) {
-  MemSrc src = {frag->buf, frag->len, 0};
-  SlateFrag *f = slate_frag_load(mem_src, &src);
+  SlateFrag *f = ms_load(frag);
   CHECK(f != NULL, "frag_load ok");
   if (!f) return;
 
@@ -169,10 +155,10 @@ int main(void) {
       int64_t c00 = 1*10 + 2*20 + 3*30 + 4*40;
       CHECK(c00 == 300, "hand arithmetic sanity (C[0][0]=300)");
     }
-    MemSink frag = build_matmul_fragment(M, K, D);
-    CHECK(frag.len > 0, "4x4 fragment serialized nonempty");
+    MsProg frag = build_matmul_fragment(M, K, D);
+    CHECK(frag.pn > 0, "4x4 fragment serialized nonempty");
     splice_run_verify(&frag, A, B, M, K, D, "4x4x4");
-    free(frag.buf);
+    ms_prog_free(&frag);
   }
 
   /* ---- Case 2: rectangular multi-param dispatch M=3, K=5, D=2 through the fragment path ---- */
@@ -181,10 +167,10 @@ int main(void) {
     int64_t A[15], B[10];
     for (int t = 0; t < M * K; t++) A[t] = (int64_t)((t * 7 + 3) % 13) - 6;   /* [-6,6] */
     for (int t = 0; t < K * D; t++) B[t] = (int64_t)((t * 5 + 1) % 11) - 5;   /* [-5,5] */
-    MemSink frag = build_matmul_fragment(M, K, D);
-    CHECK(frag.len > 0, "3x5x2 fragment serialized nonempty");
+    MsProg frag = build_matmul_fragment(M, K, D);
+    CHECK(frag.pn > 0, "3x5x2 fragment serialized nonempty");
     splice_run_verify(&frag, A, B, M, K, D, "3x5x2");
-    free(frag.buf);
+    ms_prog_free(&frag);
   }
 
   /* ---- Case 3: negative-value accumulation, 4x4x4, distinct A/B from case 1 ---- */
@@ -192,9 +178,9 @@ int main(void) {
     const int M = 4, K = 4, D = 4;
     int64_t A[16], B[16];
     for (int t = 0; t < 16; t++) { A[t] = (int64_t)(t - 8); B[t] = (int64_t)((t % 5) - 2) * ((t & 1) ? -1 : 1); }
-    MemSink frag = build_matmul_fragment(M, K, D);
+    MsProg frag = build_matmul_fragment(M, K, D);
     splice_run_verify(&frag, A, B, M, K, D, "4x4x4-signed");
-    free(frag.buf);
+    ms_prog_free(&frag);
   }
 
   /* ---- Diagnostic: does a direct (non-fragment) run of the same DAG report the same domain? ---- */

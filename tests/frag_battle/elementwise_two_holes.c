@@ -17,21 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
 /* ---- memory sink + cursor source (same pattern as tests/unit/engine/frag_cabi.c) ---- */
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
-}
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); fails++; } \
@@ -41,8 +29,8 @@ static int fails = 0;
 
 /* Build root[i] = A[i] + B[i] - A[i], holes = {A,B} in that declared order. Returns serialized bytes.
  * cidA is registered first then cidB, and holes[] lists {cidA, cidB} so slot0=A, slot1=B. */
-static MemSink build_add_sub(void) {
-  SlateDag *b = slate_dag_new();
+static MsProg build_add_sub(void) {
+  SlateDag *b = ms_dag();
   int64_t ph[N] = {0};
   uint32_t cidA = slate_dag_carrier(b, ph, N);
   uint32_t cidB = slate_dag_carrier(b, ph, N);
@@ -52,17 +40,17 @@ static MemSink build_add_sub(void) {
   int32_t lA2 = slate_dag_load(b, cidA, p);          /* ... twice */
   int32_t sum = slate_dag_add(b, lA, lB);            /* A + B */
   int32_t root = slate_dag_sub(b, sum, lA2);         /* (A + B) - A */
-  MemSink out = {0};
+  MsProg out = {0};
   uint32_t holes[2] = {cidA, cidB};                  /* slot0 = A, slot1 = B */
-  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
+  const char *rc = ms_keep(b, root, holes, 2, &out);
   CHECK(rc == NULL, "T1 save_fragment(A+B-A) ok");
   slate_dag_free(b);
   return out;
 }
 
 /* Build root[i] = A[i]*B[i] + A[i]. holes {A,B}. */
-static MemSink build_mul_add(void) {
-  SlateDag *b = slate_dag_new();
+static MsProg build_mul_add(void) {
+  SlateDag *b = ms_dag();
   int64_t ph[N] = {0};
   uint32_t cidA = slate_dag_carrier(b, ph, N);
   uint32_t cidB = slate_dag_carrier(b, ph, N);
@@ -72,18 +60,17 @@ static MemSink build_mul_add(void) {
   int32_t lA2 = slate_dag_load(b, cidA, p);
   int32_t prod = slate_dag_mul(b, lA, lB);           /* A*B */
   int32_t root = slate_dag_add(b, prod, lA2);        /* A*B + A */
-  MemSink out = {0};
+  MsProg out = {0};
   uint32_t holes[2] = {cidA, cidB};
-  const char *rc = slate_dag_save_fragment(b, root, holes, 2, mem_sink, &out);
+  const char *rc = ms_keep(b, root, holes, 2, &out);
   CHECK(rc == NULL, "T2 save_fragment(A*B+A) ok");
   slate_dag_free(b);
   return out;
 }
 
 /* splice frag over (arg0,arg1) supplied in slot order, run grid[N], read N cells. rc 0 ok. */
-static int splice_run2(const MemSink *frag, const int64_t arg0[N], const int64_t arg1[N], int64_t out[N]) {
-  MemSrc src = {frag->buf, frag->len, 0};
-  SlateFrag *f = slate_frag_load(mem_src, &src);
+static int splice_run2(const MsProg *frag, const int64_t arg0[N], const int64_t arg1[N], int64_t out[N]) {
+  SlateFrag *f = ms_load(frag);
   if (!f) return -1000;
   SlateDag *b = slate_dag_new();
   uint32_t c0 = slate_dag_carrier(b, arg0, N);
@@ -117,13 +104,12 @@ int main(void) {
   int64_t B[N] = {100, 200, 300, 400, 500};
 
   /* ===== Target 1: A + B - A  == B ===== */
-  MemSink f1 = build_add_sub();
-  CHECK(f1.len > 0, "T1 fragment nonempty");
+  MsProg f1 = build_add_sub();
+  CHECK(f1.pn > 0, "T1 fragment nonempty");
 
   /* iface: exactly 2 holes, slots 0 and 1 in order, both array-kind */
   {
-    MemSrc src = {f1.buf, f1.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&f1);
     CHECK(f != NULL, "T1 frag_load ok");
     uint32_t np = 0, nh = 0;
     slate_iface_receipt root_r;
@@ -167,11 +153,11 @@ int main(void) {
     if (!match) { printf("   got:"); for (int i=0;i<N;i++) printf(" %lld",(long long)out[i]); printf("\n"); }
   }
 
-  free(f1.buf);
+  ms_prog_free(&f1);
 
   /* ===== Target 2: A*B + A == A*(B+1) ===== */
-  MemSink f2 = build_mul_add();
-  CHECK(f2.len > 0, "T2 fragment nonempty");
+  MsProg f2 = build_mul_add();
+  CHECK(f2.pn > 0, "T2 fragment nonempty");
   {
     int64_t out[N] = {0};
     int rc = splice_run2(&f2, A, B, out);
@@ -202,7 +188,7 @@ int main(void) {
     CHECK((B[0]*A[0]+B[0]) != (A[0]*B[0]+A[0]), "T2 swap is observably different");
   }
 
-  free(f2.buf);
+  ms_prog_free(&f2);
 
   if (fails == 0) printf("PASS elementwise_two_holes: all checks\n");
   else printf("FAILED: %d check(s)\n", fails);

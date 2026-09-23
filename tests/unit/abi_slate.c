@@ -4,8 +4,9 @@
  * Gate: two binaries are two numbers and their relationship is one rational in Q — the reading of div is the reduced
  * fraction, whatever the size of the binaries; every global question about the pair is a sign question answered by
  * a reading, never by recomposing; the store is on the seam — the same construction in a second builder is a hit
- * with no rows put; a fragment is the interchange unit — saved, loaded, spliced over new binaries, and invoked by
- * name; a checkpoint stops and resumes the same builder; a refusal is a name, never a wrong value. */
+ * with no rows put; a fragment is the interchange unit — kept as a leaf, loaded back by name in another
+ * container over the same store, spliced over new binaries, and invoked by name; a refusal is a name, never a
+ * wrong value. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,18 +84,6 @@ static int st_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n, c
 }
 static void st_free(Store *st) { for (size_t i = 0; i < st->n; i++) { free(st->r[i].w); free(st->r[i].b); } free(st->r); memset(st, 0, sizeof *st); }
 
-/* ---- a memory sink / source for checkpoints and fragments ---- */
-typedef struct { uint8_t *p; uint64_t n, cap, cur; } Mem;
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *u) {
-  Mem *m = (Mem *)u;
-  if (m->n + n > m->cap) { m->cap = (m->n + n) * 2 + 64; m->p = (uint8_t *)realloc(m->p, (size_t)m->cap); }
-  memcpy(m->p + m->n, bytes, (size_t)n); m->n += n; return n;
-}
-static uint64_t mem_source(void *bytes, uint64_t n, void *u) {
-  Mem *m = (Mem *)u; if (m->cur + n > m->n) return 0;
-  memcpy(bytes, m->p + m->cur, (size_t)n); m->cur += n; return n;
-}
-
 /* the construction under test, over the binaries A = j·G and B = k·G registered in `b` */
 typedef struct { uint32_t ca, cb, cg; int32_t A, B, G; } Pair;
 static Pair build(SlateDag *b, const uint8_t *G, size_t ng, unsigned j, unsigned k) {
@@ -161,47 +150,49 @@ int main(void) {
     st_free(&st);
   }
 
-  /* ---- 4. a fragment is the interchange unit: save with the binaries as holes, load, splice over new ones, invoke ---- */
+  /* ---- 4. a fragment is the interchange unit: keep it as a leaf with the binaries as holes, load it back by
+     name in a fresh container over the same store, splice over new ones, invoke ---- */
   {
     uint8_t G[40]; random_bytes(G, 40, 17);
-    SlateDag *b = slate_dag_new(); Pair p = build(b, G, 40, 3, 5);
+    Store st; memset(&st, 0, sizeof st);
+    SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+    Pair p = build(b, G, 40, 3, 5);
     int32_t root = slate_dag_div(b, p.A, p.B);
-    Mem fr; memset(&fr, 0, sizeof fr); uint32_t holes[2] = { p.ca, p.cb };
-    CHECK(slate_dag_save_fragment(b, root, holes, 2, mem_sink, &fr) == NULL, "4: save refused");
+    uint8_t *fw = NULL; uint64_t fwn = 0, fpn = 0; uint32_t holes[2] = { p.ca, p.cb };
+    CHECK(slate_dag_save_fragment(b, root, holes, 2, &fw, &fwn, &fpn) == NULL, "4: keep refused");
     slate_dag_free(b);
-    fr.cur = 0; SlateFrag *f = slate_frag_load(mem_source, &fr); CHECK(f, "4: load refused");
+    /* another container, the same store: a program one kept is loaded by name by another */
+    SlateDag *lb = slate_dag_new(); slate_dag_codec(lb, NULL, st_get, st_put, NULL, 0, &st);
+    SlateFrag *f = slate_frag_load(lb, fw, fwn, fpn); CHECK(f, "4: load refused");
     uint32_t np = 0, nh = 0; slate_iface_receipt rr; CHECK(slate_frag_iface(f, &np, NULL, &nh, &rr) == NULL && nh == 2, "4: iface: %u holes (want 2)", nh);
     CHECK(rr.kind && strcmp(rr.kind, "scalar") == 0 && (!rr.domain || strcmp(rr.domain, "Q") == 0), "4: root receipt %s/%s (want scalar, Q or derived)", rr.kind ? rr.kind : "?", rr.domain ? rr.domain : "derived");
     /* splice over new binaries A' = 7·G', B' = 2·G' of the same lengths (the record reads a fixed window of each hole —
        a binary of another length is another record): the same relation reads 7/2 */
     uint8_t G2[40]; random_bytes(G2, 40, 19); uint8_t A2[48], B2[48]; memcpy(A2, G2, 40); memcpy(B2, G2, 40);
     size_t na = mul_small(A2, 40, 7, 48), nb = mul_small(B2, 40, 2, 48);
-    SlateDag *c = slate_dag_new(); uint32_t args[2] = { slate_dag_carrier_bytes(c, A2, na), slate_dag_carrier_bytes(c, B2, nb) };
+    SlateDag *c = slate_dag_new(); slate_dag_codec(c, NULL, st_get, st_put, NULL, 0, &st);
+    uint32_t args[2] = { slate_dag_carrier_bytes(c, A2, na), slate_dag_carrier_bytes(c, B2, nb) };
     int32_t r2 = -1; CHECK(slate_dag_splice(c, f, args, 2, &r2) == NULL && r2 >= 0, "4: splice refused");
     reads(c, r2, 0, 7, 2, "Q", "4: spliced A'/B'");
     /* reflection: the spliced root is a div over two ops */
     { const char *kind = NULL, *op = NULL; int32_t x = -1, y = -1; CHECK(slate_dag_node(c, r2, &kind, &op, &x, &y, NULL, NULL) == NULL && kind && strcmp(kind, "op") == 0 && op && strcmp(op, "div") == 0 && x >= 0 && y >= 0, "4: the root is not a div"); }
     slate_dag_free(c);
-    /* invoke by name: the .slate bytes and the two binaries, one call */
+    /* invoke by name: the program's name and the two binaries, one call, in a container over the same store */
     { const uint8_t *av[2] = { A2, B2 }; uint64_t al[2] = { na, nb };
-      SlateArray *a = slate_invoke(fr.p, fr.n, av, al, 2, NULL, 0, NULL, 0); Reading r;
-      CHECK(a && read1(a, &r) == 0 && r.sign == 0 && r.num == 7 && r.den == 2, "4: invoke read %llu/%llu", (unsigned long long)r.num, (unsigned long long)r.den); slate_array_free(a); }
+      SlateDag *iv = slate_dag_new(); slate_dag_codec(iv, NULL, st_get, st_put, NULL, 0, &st);
+      SlateArray *a = slate_invoke(iv, fw, fwn, fpn, av, al, 2, NULL, 0, NULL, 0); Reading r;
+      CHECK(a && read1(a, &r) == 0 && r.sign == 0 && r.num == 7 && r.den == 2, "4: invoke read %llu/%llu", (unsigned long long)r.num, (unsigned long long)r.den);
+      slate_array_free(a); slate_dag_free(iv); }
+    /* a word no store holds is a miss: nothing to invoke */
+    { uint8_t *junk = (uint8_t *)malloc((size_t)fwn); for (uint64_t i = 0; i < fwn; i++) junk[i] = (uint8_t)(fw[i] ^ 0xA5);
+      SlateDag *iv = slate_dag_new(); slate_dag_codec(iv, NULL, st_get, st_put, NULL, 0, &st);
+      CHECK(slate_invoke(iv, junk, fwn, fpn, NULL, NULL, 0, NULL, 0, NULL, 0) == NULL, "4: an unkept name was invoked");
+      slate_dag_free(iv); free(junk); }
     /* wrong arity refuses before any node is emitted */
     { SlateDag *d = slate_dag_new(); int32_t r3 = 0; CHECK(slate_refused(slate_dag_splice(d, f, args, 1, &r3), "args") && r3 == -1, "4: wrong arity not refused"); slate_dag_free(d); }
-    slate_frag_free(f); free(fr.p);
-    printf("  fragment: A/B saved with two holes (%llu bytes), loaded (scalar), spliced over 7·G'/2·G' reads 7/2, invoked by name reads 7/2\n", (unsigned long long)fr.n);
-  }
-
-  /* ---- 5. a checkpoint: stop the builder to bytes, restore it, the same root reads the same ---- */
-  {
-    uint8_t G[40]; random_bytes(G, 40, 23);
-    SlateDag *b = slate_dag_new(); Pair p = build(b, G, 40, 3, 5); int32_t root = slate_dag_div(b, p.A, p.B);
-    Mem ck; memset(&ck, 0, sizeof ck);
-    CHECK(slate_dag_stop(b, mem_sink, &ck) == NULL && ck.n > 0, "5: stop refused");
-    ck.cur = 0; CHECK(slate_dag_restore(b, mem_source, &ck) == NULL, "5: restore refused");
-    reads(b, root, 0, 3, 5, "Q", "5: after restore");
-    slate_dag_free(b); free(ck.p);
-    printf("  checkpoint: stopped to %llu bytes, restored, the pre-stop root reads 3/5\n", (unsigned long long)ck.n);
+    slate_frag_free(f); slate_dag_free(lb);
+    printf("  fragment: A/B kept with two holes (%llu bytes as byte cells), loaded by name (scalar), spliced over 7·G'/2·G' reads 7/2, invoked by name reads 7/2\n", (unsigned long long)fpn);
+    free(fw); st_free(&st);
   }
 
   /* ---- 6. refusals are names, never values ---- */
@@ -217,6 +208,6 @@ int main(void) {
   }
 
   if (fails) { printf("FAIL test_abi_slate: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_slate: two binaries one relation in Q; order a sign; the store on the seam; a fragment shipped, spliced, invoked; a checkpoint resumed; refusals named\n");
+  printf("PASS test_abi_slate: two binaries one relation in Q; order a sign; the store on the seam; a fragment kept as a leaf, loaded by name, spliced, invoked; refusals named\n");
   return 0;
 }

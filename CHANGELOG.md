@@ -2,6 +2,51 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.8.0
+
+- **Everything in the store has one shape, and a program is no exception.** A construction written out as
+  bytes is a leaf, exactly like bytes handed in: it goes through the same door and lands as byte cells under
+  its own word (`Arena::leaf_key` — the lens in the clear, then the bytes; one cell per byte, sign positive,
+  A = the byte, B = 1). With a roster it is sliced across the carrying machines by the door in front of the
+  store and gathered whole by anyone who asks for the word. It is not a row of its own kind, it is not carried
+  inside an ask, and it is not a file.
+- **A program's name is `word ‖ count`** — the word's bytes, then the leaf's byte count as 8 little-endian
+  bytes. One spelling everywhere a program is named in a single byte string: `slate_dag_program`, the
+  container's program, the tail slot, `"slate.emit"`'s answer, `"slate.run"`'s request and `"slate.tail"`'s
+  hand-off. A leaf is read back by its cell count, and a word alone does not say how many cells to ask for.
+  The doors that take the two apart take them as separate arguments, and so does the ask.
+- **`slate_dag_save_fragment` keeps the fragment and hands back its name**, instead of writing a stream to a
+  caller's sink:
+  `const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const uint32_t *holes, uint32_t nholes, uint8_t **word, uint64_t *wn, uint64_t *pn)`.
+  `*word` is malloc'd (the caller frees it); a leaf already kept under that word is a hit and is not put
+  again; a store that kept nothing refuses `"refused"` — a program nobody can read is not a program.
+- **`slate_frag_load` reads that leaf back by name**, instead of pulling from a caller's source:
+  `SlateFrag *slate_frag_load(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t pn)`. A word the store
+  does not hold — or, on a machine carrying one share of a roster, a leaf the door could not gather whole —
+  is a miss and returns NULL, never a guess. The parsed length must be exactly the leaf's.
+- **`slate_invoke` takes the container and the name**:
+  `SlateArray *slate_invoke(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t pn, ...)`. The container
+  is the caller's, because the store is: which store holds the program is what the container says. The builder
+  is no longer created and freed inside.
+- **The fragment's bytes carry no marker of their own.** The leading magic and version words are gone: the
+  store's word already says what the bytes are. What remains is the counts the parser reads by and a crc over
+  the body — which is now what catches a store that hands back a different byte.
+- **The ask carries no bytes and no tag.** New layout, little-endian, fixed order, bounds-checked
+  (`embed.h` spells it): `[shares u32][k u32][roster prime i64]*k [ndims u32][dim i64]*ndims [wn u64][program
+  word u8]*wn [pn u64]`. No tag byte, no version byte, and no program row: the construction does not travel,
+  only its name does, and the taker reads the leaf out of its own store through the same door as any other
+  row. A word without its count, or a count without its word, refuses `"args"`.
+- **Removed: `slate_dag_stop` / `slate_dag_restore`** and their test. Under the one shape a checkpoint is the
+  root's word — every step is a row already — so there is no door here that stops a construction to bytes and
+  reads it back. The durable, position-independent token a caller carries is still the root's fragment:
+  `slate_dag_save_fragment`, recovered with `slate_frag_load` + `slate_dag_splice`. (`Arena::stop`/`load`
+  remain as the C++ serializer.) `slate/slate.h` no longer includes `slate/stream.h`.
+- `slate_dag_program` takes a name rather than a bare word; `slate_dag_start` refuses one that is not a name.
+- Tests: `tests/memstore.h` — a hashed in-memory store for the pure-C tests, and the byte-cell reader/writer a
+  test needs to lie to a load. `abi_slate`, `abi_embed`, `engine/frag_cabi`, `engine/div_cabi` and every
+  `frag_battle/*` keep and load through it. The hostile-input corpus now fuzzes the store rather than a file:
+  one cell of a leaf is one byte of the program, and the crc is what catches a store that moves one.
+
 ## 0.7.0
 
 - **`slate_dag_roster`** (embed band): the whole lens a container's words name, and its division. The primes

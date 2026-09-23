@@ -1,25 +1,15 @@
 /* Rational division through the C ABI: slate_dag_div builds (s+1)/(s+2) over a grid; the records are the reduced
  * fractions; the receipt's domain is Q; the int64 door answers "wide" for a non-integer cell; a fragment holding the
- * quotient saves, loads (the "rational" feature) and splices to the same cells. No C++ in this translation unit. */
+ * quotient is kept as a leaf, loaded back by name (the "rational" feature) and spliced to the same cells. No C++
+ * in this translation unit. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "slate/slate.h"
+#include "../../memstore.h"
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL div_cabi: %s\n", msg); fails++; } } while (0)
-
-typedef struct { uint8_t *buf; size_t len, cap; } MemSink;
-static uint64_t mem_sink(const void *p, uint64_t n, void *u) {
-  MemSink *m = (MemSink *)u;
-  if (m->len + (size_t)n > m->cap) { m->cap = (m->len + (size_t)n) * 2 + 64; m->buf = (uint8_t *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, p, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const uint8_t *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *p, uint64_t n, void *u) {
-  MemSrc *m = (MemSrc *)u; size_t k = m->len - m->pos < (size_t)n ? m->len - m->pos : (size_t)n;
-  memcpy(p, m->buf + m->pos, k); m->pos += k; return k;
-}
 
 /* read cell i of a run as (sign, num0, den0) through the records door */
 static int cell(SlateArray *a, uint64_t i, uint64_t *sign, uint64_t *num0, uint64_t *den0) {
@@ -34,7 +24,10 @@ static int cell(SlateArray *a, uint64_t i, uint64_t *sign, uint64_t *num0, uint6
   free(rec); return 1;
 }
 
+static MemStore store;
+
 int main(void) {
+  ms_init(&store, 1 << 14);
   const int64_t N = 10;
   /* 1. the quotient, its records and its receipt */
   {
@@ -60,19 +53,19 @@ int main(void) {
     }
     slate_dag_free(b);
   }
-  /* 2. a fragment holding the quotient: save, load, splice, same cells */
+  /* 2. a fragment holding the quotient: kept as a leaf, loaded by name, spliced — the same cells */
   {
-    SlateDag *b = slate_dag_new();
+    SlateDag *b = slate_dag_new(); MS_INSTALL(b, &store);
     int32_t s = slate_dag_param(b, 0);
     int32_t root = slate_dag_div(b, slate_dag_add(b, s, slate_dag_lit(b, 3)), slate_dag_add(b, slate_dag_mul(b, s, s), slate_dag_lit(b, 1)));
-    MemSink out = { 0, 0, 0 };
-    CHECK(slate_dag_save_fragment(b, root, NULL, 0, mem_sink, &out) == NULL, "save the quotient fragment");
+    uint8_t *w = NULL; uint64_t wn = 0, pn = 0;
+    CHECK(slate_dag_save_fragment(b, root, NULL, 0, &w, &wn, &pn) == NULL, "keep the quotient fragment as a leaf");
     slate_dag_free(b);
-    MemSrc src = { out.buf, out.len, 0 };
-    SlateFrag *f = slate_frag_load(mem_src, &src);
-    CHECK(f != NULL, "load the quotient fragment (feature \"rational\")");
+    SlateDag *lb = slate_dag_new(); MS_INSTALL(lb, &store);
+    SlateFrag *f = slate_frag_load(lb, w, wn, pn);
+    CHECK(f != NULL, "load the quotient fragment by name (feature \"rational\")");
     if (f) {
-      SlateDag *b2 = slate_dag_new();
+      SlateDag *b2 = slate_dag_new(); MS_INSTALL(b2, &store);
       int32_t r2 = -1;
       CHECK(slate_dag_splice(b2, f, NULL, 0, &r2) == NULL && r2 >= 0, "splice");
       int64_t dims[1] = { N };
@@ -90,8 +83,10 @@ int main(void) {
       slate_dag_free(b2);
       slate_frag_free(f);
     }
-    free(out.buf);
+    slate_dag_free(lb);
+    free(w);
   }
+  ms_free(&store);
   if (fails) { printf("FAIL div_cabi: %d failure(s)\n", fails); return 1; }
   printf("PASS div_cabi: a quotient through the C ABI — reduced records, receipt domain Q, the int64 door reads num/den, a fragment with the rational feature round-trips\n");
   return 0;

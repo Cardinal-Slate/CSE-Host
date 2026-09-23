@@ -13,20 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "slate/slate.h"
-#include "slate/stream.h"
+#include "../memstore.h"
 
-typedef struct { unsigned char *buf; size_t len, cap; } MemSink;
-static uint64_t mem_sink(const void *bytes, uint64_t n, void *user) {
-  MemSink *m = (MemSink *)user;
-  if (m->len + n > m->cap) { m->cap = (m->len + n) * 2 + 64; m->buf = (unsigned char *)realloc(m->buf, m->cap); }
-  memcpy(m->buf + m->len, bytes, (size_t)n); m->len += (size_t)n; return n;
-}
-typedef struct { const unsigned char *buf; size_t len, pos; } MemSrc;
-static uint64_t mem_src(void *bytes, uint64_t n, void *user) {
-  MemSrc *s = (MemSrc *)user;
-  if (s->pos + n > s->len) return 0;
-  memcpy(bytes, s->buf + s->pos, (size_t)n); s->pos += (size_t)n; return n;
-}
 
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL deep_compose: %s\n", msg); fails++; } \
@@ -46,24 +34,23 @@ int main(void) {
   int64_t exp_final[N] = {112, 224, 336, 448};    /* A*2 + B + C */
 
   /* ---------- Level 1: build F (y = A*2), save it ---------- */
-  MemSink fragF = {0};
+  MsProg fragF = {0};
   {
-    SlateDag *b = slate_dag_new();
+    SlateDag *b = ms_dag();
     int64_t placeholderA[N] = {0};
     uint32_t cidA = slate_dag_carrier(b, placeholderA, N);
     int32_t p = slate_dag_param(b, 0);
     int32_t root = slate_dag_mul(b, slate_dag_load(b, cidA, p), slate_dag_lit(b, 2));
     uint32_t holes[1] = {cidA};
-    const char *rc = slate_dag_save_fragment(b, root, holes, 1, mem_sink, &fragF);
+    const char *rc = ms_keep(b, root, holes, 1, &fragF);
     CHECK(rc == NULL, "save fragment F (A*2)");
     slate_dag_free(b);
   }
-  CHECK(fragF.len > 0, "F serialized nonempty");
+  CHECK(fragF.pn > 0, "F serialized nonempty");
 
   /* sanity: splice F alone, run, check A*2 and exact==1 (baseline seam) */
   {
-    MemSrc src = {fragF.buf, fragF.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&fragF);
     CHECK(f != NULL, "load F");
     SlateDag *b = slate_dag_new();
     uint32_t cidA = slate_dag_carrier(b, A, N);
@@ -90,13 +77,12 @@ int main(void) {
 
   /* ---------- Level 2: splice F into a fresh builder, build g = F + B, save g as fragment G ----------
    * G must carry two holes: A (from F, wired through the splice) and B (its own carrier). */
-  MemSink fragG = {0};
+  MsProg fragG = {0};
   uint32_t g_slot_of_A = 0, g_slot_of_B = 0; int have_slots = 0;
   {
-    MemSrc src = {fragF.buf, fragF.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&fragF);
     CHECK(f != NULL, "load F for G-build");
-    SlateDag *b = slate_dag_new();
+    SlateDag *b = ms_dag();
     int64_t placeholderA[N] = {0}, placeholderB[N] = {0};
     uint32_t cidA = slate_dag_carrier(b, placeholderA, N);   /* hole A, wired into F */
     uint32_t cidB = slate_dag_carrier(b, placeholderB, N);   /* hole B, my own */
@@ -107,17 +93,16 @@ int main(void) {
     int32_t g = slate_dag_add(b, spliced, slate_dag_load(b, cidB, p));  /* A*2 + B */
     /* re-save the spliced-and-extended graph as a brand new fragment */
     uint32_t holes[2] = {cidA, cidB};
-    const char *rc = slate_dag_save_fragment(b, g, holes, 2, mem_sink, &fragG);
+    const char *rc = ms_keep(b, g, holes, 2, &fragG);
     CHECK(rc == NULL, "re-save spliced result as fragment G");
     slate_dag_free(b);
     slate_frag_free(f);
   }
-  CHECK(fragG.len > 0, "G serialized nonempty");
+  CHECK(fragG.pn > 0, "G serialized nonempty");
 
   /* introspect G: it must report 2 holes and the root PSDA type; learn the hole->carrier order */
   {
-    MemSrc src = {fragG.buf, fragG.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&fragG);
     CHECK(f != NULL, "load G");
     uint32_t np = 0, nh = 0;
     slate_iface_receipt root_r; memset(&root_r, 0, sizeof root_r);
@@ -146,8 +131,7 @@ int main(void) {
 
   /* ---------- Level 3: load G, splice it, final = G + C, run ---------- */
   {
-    MemSrc src = {fragG.buf, fragG.len, 0};
-    SlateFrag *f = slate_frag_load(mem_src, &src);
+    SlateFrag *f = ms_load(&fragG);
     CHECK(f != NULL, "load G for final");
     SlateDag *b = slate_dag_new();
     uint32_t cidA = slate_dag_carrier(b, A, N);
@@ -197,8 +181,8 @@ int main(void) {
     slate_frag_free(f);
   }
 
-  free(fragF.buf);
-  free(fragG.buf);
+  ms_prog_free(&fragF);
+  ms_prog_free(&fragG);
   if (fails == 0) printf("ALL PASS deep_compose\n");
   else printf("%d FAILURE(S) deep_compose\n", fails);
   return fails ? 1 : 0;

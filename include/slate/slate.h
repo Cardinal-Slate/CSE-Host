@@ -24,7 +24,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "slate/stream.h"   /* slate_sink / slate_source — the byte-stream callbacks for stop / restore / fragments */
 #include "slate/trace.h"    /* slate_entry — what a receipt says */
 
 /* A call answers NULL when it did what was asked, else the name of the refusal — a static string, one of:
@@ -169,7 +168,7 @@ SlateArray *slate_dag_run(SlateDag *b, int32_t root, const int64_t *dims, uint32
 ///   outcome   utf8      value | not-defined | no-authoritative-value
 ///   height    bits:u64  (P — the height bound carried into the read)
 /// The entries live as long as `a`. Read this and keep the values *resident* in the engine (chain another
-/// build over the result, or persist with slate_dag_stop) — do not pull cells out. NULL, or "args" on nulls.
+/// build over the result) — do not pull cells out. NULL, or "args" on nulls.
 const char *slate_array_receipt(const SlateArray *a, const slate_entry **entries, int32_t *n);
 
 /// The cell count (∏dims) of a result.
@@ -190,30 +189,21 @@ const char *slate_array_i64_unsafe(const SlateArray *a, int64_t *num, int64_t *d
 /// Frees a result and its cells.
 void slate_array_free(SlateArray *a);
 
-/* ---- persist / resume: stream a construction over the byte callbacks (wraps Arena stop/load) ---- */
-
-/// Serializes the builder's whole construction (nodes + literal pool) to `sink` — the .slate checkpoint —
-/// and sheds its memory. After stop the builder holds no construction: an op before slate_dag_restore refuses and
-/// poisons it (as any bad id does); a result already produced by slate_dag_run stays valid (it owns its cells). Returns NULL, "args" on null, or "internal" if
-/// the stream refused.
-const char *slate_dag_stop(SlateDag *b, slate_sink sink, void *user);
-
-/// Restores a construction serialized by slate_dag_stop from `source`, resuming the same builder: the node
-/// table returns 1:1 so pre-stop ids still resolve and a budget-stopped (Incomplete) reading resumes where it
-/// left off. A raw node id is not the durable identity — the handle to carry a computation across a
-/// checkpoint is its fragment (slate_dag_save_fragment, recovered by slate_frag_load + slate_dag_splice).
-/// Returns NULL, "args", or "internal".
-const char *slate_dag_restore(SlateDag *b, slate_source source, void *user);
-
-/* ---- fragment libraries: a .slate file is a serialized record with typed holes ---------------------------
+/* ---- fragment libraries: a serialized record with typed holes, kept as a leaf -----------------------------
  *
  * A fragment is a construction with unbound carriers (holes) — a reusable graph piece, not a finished
  * computation. save_fragment records the sub-DAG rooted at a node as normalized builder instructions (the
- * portable source form, never lowered nodes — each host re-lowers in its own context); load parses it back;
- * splice replays it into another builder, wiring the caller's carriers into its holes and returning the new
- * root node id. Receipts compose at the seam. It is bytes, so any host linking libslate loads and splices the
- * same file; evaluation is referentially transparent over canonical ℚ, so a spliced fragment's reading is a
- * pure function of the graph — save, load, run reproduces it on any host, or refuses. */
+ * portable source form, never lowered nodes — each host re-lowers in its own context) and keeps those bytes as
+ * a leaf: one cell per byte, under their own word, through the same door as any bytes handed in. load reads
+ * that leaf back by word and byte count and parses it; splice replays it into another builder, wiring the
+ * caller's carriers into its holes and returning the new root node id. Receipts compose at the seam. Any
+ * container whose store holds the leaf loads and splices it, so a construction travels as a name and never as
+ * bytes; evaluation is referentially transparent over canonical ℚ, so a spliced fragment's reading is a
+ * pure function of the graph — keep, load, run reproduces it wherever the word resolves, or refuses.
+ *
+ * A program's name, wherever one is carried in a single byte string (slate_dag_program, the "slate.emit"
+ * answer, the "slate.run" request, the "slate.tail" hand-off), is `word ‖ count`: the word's bytes, then the
+ * byte count as 8 little-endian bytes. The doors here take the two as separate arguments. */
 
 /// A fragment interface receipt — the *signature* of a hole or the root (what it expects / produces).
 typedef struct {
@@ -229,20 +219,27 @@ typedef struct {
   slate_iface_receipt receipt;  /* what the caller must supply */
 } slate_hole;
 
-/// Serialize the sub-DAG rooted at `root` to `sink` as a fragment, declaring the carrier ids in `holes`
-/// (nholes of them) as unbound inputs. Carriers referenced by `root` but not listed in `holes` are baked in
-/// as constants (their int64 cell values are serialized) — a baked carrier must be a plain positional
-/// integer array (an RNS/float carrier must be a hole).
-/// @return NULL; "args" (null/poisoned builder, bad root, a hole id that is not a carrier `root` reads, or a
-///         non-serializable baked carrier); "internal" (the sink refused).
+/// Keep the sub-DAG rooted at `root` as a fragment leaf, declaring the carrier ids in `holes` (nholes of them)
+/// as unbound inputs, and hand back its name: `*word` (a malloc'd buffer of `*wn` bytes — the caller frees it
+/// with free()) and `*pn`, the leaf's byte count. Carriers referenced by `root` but not listed in `holes` are
+/// baked in as constants (their int64 cell values are serialized) — a baked carrier must be a plain positional
+/// integer array (an RNS/float carrier must be a hole). The bytes go through the region's store (slate_dag_codec)
+/// as one cell per byte; a leaf already kept under that word is a hit and is not put again. Nothing is written
+/// anywhere else: there is no sink and no file.
+/// @return NULL; "args" (null/poisoned builder, a null out, bad root, a hole id that is not a carrier `root`
+///         reads, or a non-serializable baked carrier); "refused" (the store kept nothing — a program nobody
+///         can read is not a program); "nomem"; "internal".
 const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const uint32_t *holes, uint32_t nholes,
-                            slate_sink sink, void *user);
+                            uint8_t **word, uint64_t *wn, uint64_t *pn);
 
-/// Parse a fragment from `source`. Fully validated before it is usable (magic/version, back-reference-only
-/// child ids so the graph is acyclic, in-range carrier/param references, bounded sizes, a crc over the body),
-/// so a malformed or hostile stream returns NULL rather than a bad fragment. Caller owns; free with
-/// slate_frag_free. The fragment is immutable and may be spliced into many builders and read from any thread.
-SlateFrag *slate_frag_load(slate_source source, void *user);
+/// Read the fragment leaf `word`/`wn` names — `pn` bytes of it — out of `b`'s store and parse it. Fully
+/// validated before it is usable (back-reference-only child ids so the graph is acyclic, in-range
+/// carrier/param references, bounded sizes, a crc over the body, and a length that is exactly the leaf's), so
+/// a malformed or hostile leaf returns NULL rather than a bad fragment. A word the store does not hold — or, on
+/// a machine carrying one share of a roster, a leaf the door in front of the store could not gather whole — is
+/// a miss and returns NULL, never a guess. Caller owns; free with slate_frag_free. The fragment is immutable
+/// and may be spliced into many builders and read from any thread.
+SlateFrag *slate_frag_load(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t pn);
 
 /// Report the interface: the number of grid params, the holes and their receipts, and the root receipt. Pass
 /// NULL for any out you do not want. Size-then-fill for the holes: pass `holes_out` NULL to read the count in
@@ -265,18 +262,19 @@ const char *slate_dag_splice(SlateDag *b, const SlateFrag *f, const uint32_t *ar
 /// Free a loaded fragment. Node results and builders already produced from a splice stay valid (splice copies).
 void slate_frag_free(SlateFrag *f);
 
-/// The executable invariant, as one call. Load a fragment from `frag`/`frag_len`, register each byte-arg as a
-/// carrier and wire them into the fragment's holes (in slate_frag_iface order; `nargs` must equal the hole
-/// count), run the spliced root over `dims`/`ndims`, and return the reading: a program that lives on disk as a
-/// .slate is invoked by naming it and its inputs — no host-side builder glue, in any language. `caps` are the
-/// `ncaps` effect class names granted (0 = none; see slate/embed.h). Pure: no host I/O — the fragment performs
-/// any I/O through the providers its grant allows. The builder is created and freed internally; the returned
-/// SlateArray is caller-owned (read via slate_array_*, free with slate_array_free) and outlives this call. Pass
-/// `dims` NULL for a scalar reading ({1}). A run that refuses but is well-formed still returns an array whose
-/// slate_array_receipt reports refused.
-/// @return the reading, or NULL on allocation failure, a malformed fragment, a hole typecheck/arity failure, or
-///         a run that produced no array.
-SlateArray *slate_invoke(const uint8_t *frag, uint64_t frag_len,
+/// The executable invariant, as one call. Read the fragment leaf `word`/`wn`/`pn` names out of `b`'s store,
+/// register each byte-arg as a carrier and wire them into the fragment's holes (in slate_frag_iface order;
+/// `nargs` must equal the hole count), run the spliced root over `dims`/`ndims`, and return the reading: a
+/// program that lives in the store is invoked by naming it and its inputs — no host-side builder glue, in any
+/// language. `caps` are the `ncaps` effect class names granted (0 = none; see slate/embed.h). Pure: no host
+/// I/O — the fragment performs any I/O through the providers its grant allows. The container is the caller's,
+/// because the store is: install it with slate_dag_codec and free the builder when done. The returned
+/// SlateArray is caller-owned (read via slate_array_*, free with slate_array_free) and outlives the builder.
+/// Pass `dims` NULL for a scalar reading ({1}). A run that refuses but is well-formed still returns an array
+/// whose slate_array_receipt reports refused.
+/// @return the reading, or NULL on a null builder, a word the store does not hold, a malformed fragment, a hole
+///         typecheck/arity failure, or a run that produced no array.
+SlateArray *slate_invoke(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t pn,
                          const uint8_t *const *args, const uint64_t *arg_lens, uint32_t nargs,
                          const char *const *caps, uint32_t ncaps, const int64_t *dims, uint32_t ndims);
 
