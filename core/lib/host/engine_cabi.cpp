@@ -609,8 +609,8 @@ extern "C" const char *slate_dag_carrier_set(SlateDag *b, uint32_t cid, const in
 /* There is no door here that stops a construction to bytes and reads it back. Every step is a row already:
  * the word of a step is the name of what it computed, so where a construction has got to is what its store
  * holds under its words, and the root's word is the whole of it. The durable, position-independent token a
- * caller carries is the root's fragment: keep it with slate_dag_save_fragment (which hands back its word and
- * byte count), and recover it with slate_frag_load + slate_dag_splice, which replays the construction into a
+ * caller carries is the root's fragment: keep it with slate_dag_save_fragment (which hands back its word), and
+ * recover it with slate_frag_load + slate_dag_splice, which replays the construction into a
  * fresh builder and returns a new root id. A raw int32 node id is a within-build positional handle, never
  * identity across time. The token addresses the op1-5 (add/sub/mul/mulh/asr) plain-positional-integer-carrier
  * subset only; a root reached through an RNS/ℚ (carrier_q), f32, or width>8 carrier must declare that carrier
@@ -710,9 +710,9 @@ extern "C" int32_t slate_dag_asr(SlateDag *b, int32_t x, int32_t sh) try {
  * the next program's name through this container's store and run what it names in a fresh arena that shares this
  * container (grant / fds / providers), and loop. Each hand-off is a finite dispatch, so a cycle of finite programs
  * (a service) is a chain of finite dispatches — no native stack, no growing graph, the container (e.g. a listening
- * fd) carried across. A program is a leaf: the slot holds its name (`word ‖ count`), the store holds its byte
- * cells, and a fleet of ticks all read one program with nothing shipped between them. A word the store does not
- * hold ends the service with a refusal, never a wrong tick. The tick writes its own hand-off back to this
+ * fd) carried across. A program is a leaf: the slot holds its word, the store holds its byte cells, and a
+ * fleet of ticks all read one program with nothing shipped between them. A word the store does not hold — or
+ * one whose leaf is not whole yet — ends the service with a refusal, never a wrong tick. The tick writes its own hand-off back to this
  * container's tail slot, which this loop reads; a tick that hands off to nothing ends the trampoline. The result
  * buffer owns its cells (outlives the tick builder), so each tick's builder is freed — nothing accumulates. */
 static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, const std::vector<long long> &dv,
@@ -722,8 +722,7 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
     if (!b->tail_prog_buf.empty()) { cur.swap(b->tail_prog_buf); b->tail_prog_buf.clear(); }   /* hand off to a new program */
     else if (cur.empty()) break;               /* a repeat-tail before any named hand-off: nothing to repeat */
     /* else: tail_prog empty + cur set = a repeat-tail — run the same program again (a finite program that loops) */
-    const uint8_t *pw = nullptr; size_t pwn = 0; uint64_t pn = 0;
-    if (!Slate::program_name_read(cur.data(), cur.size(), &pw, &pwn, &pn)) return Slate::ArrayReading{};
+    if (cur.empty()) return Slate::ArrayReading{};   /* a word of no bytes names nothing */
     SlateDag *t = new (std::nothrow) SlateDag();
     if (!t) return Slate::ArrayReading{};
     Slate::Envelope &te = t->arena.env(), &be = b->arena.env();
@@ -732,8 +731,8 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
      * instead of the old hand-picked subset that silently dropped Potential/budget/executor across a hand-off.
      * te keeps its own frag_self (owner check); a tick may still override any axis locally, scoped to itself. */
     te.inherit_from(be);
-    /* the program's leaf, read out of this container's store by its name — the store is the memory */
-    SlateFrag *f = slate_frag_load(t, pw, (uint64_t)pwn, pn);
+    /* the program's leaf, walked out of this container's store by its word — the store is the memory */
+    SlateFrag *f = slate_frag_load(t, cur.data(), (uint64_t)cur.size());
     if (!f) { delete t; return Slate::ArrayReading{}; }
     int32_t tr = -1; slate_dag_splice(t, f, nullptr, 0, &tr);
     slate_frag_free(f);
@@ -776,7 +775,7 @@ static bool run_dims(SlateDag *b, bool recall, const int64_t *dims, uint32_t ndi
 
 /* Keep the construction rooted at `root` as a leaf, and name it: the graph's bytes through the same door as any
  * bytes handed in — one cell per byte under the word of (the lens in the clear ‖ the bytes), exactly as the emit
- * door keeps one — and that name (`word ‖ count`) set as this container's program. A machine that takes this
+ * door keeps one — and that word set as this container's program. A machine that takes this
  * container's ask then has a name for the construction and needs none of its bytes: with a roster the leaf is
  * sliced across the carrying machines by the door in front of the store, and gathered whole by anyone who asks
  * for the word. A graph that is not fragment-addressable (an RNS/ℚ, f32 or wide carrier — see
@@ -784,9 +783,9 @@ static bool run_dims(SlateDag *b, bool recall, const int64_t *dims, uint32_t ndi
  * program. */
 static void keep_program_leaf(SlateDag *b, int32_t root) {
   uint8_t *w = nullptr;
-  uint64_t wn = 0, pn = 0;
-  if (slate_dag_save_fragment(b, root, nullptr, 0, &w, &wn, &pn) != nullptr) return;
-  b->arena.env().program = Slate::program_name(w, (size_t)wn, pn);
+  uint64_t wn = 0;
+  if (slate_dag_save_fragment(b, root, nullptr, 0, &w, &wn) != nullptr) return;
+  b->arena.env().program.assign(w, w + wn);
   std::free(w);
 }
 
@@ -828,9 +827,9 @@ extern "C" SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_
   return nullptr;
 }
 
-extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *name, uint64_t n) {
-  if (!b || (n && !name)) return "args";
-  b->arena.env().program.assign(name, name + n);
+extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t n) {
+  if (!b || (n && !word)) return "args";
+  b->arena.env().program.assign(word, word + n);
   return nullptr;
 }
 
@@ -838,13 +837,14 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *name, uint6
  * share. Host's own format, little-endian, fixed order and byte exact (embed.h spells it):
  *
  *     [shares u32][k u32][roster prime i64] * k
- *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn [pn u64]
+ *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn
  *
- * Nothing rides in front of it: no tag byte, no version byte. The construction does not travel — only its name
- * does: the program's word and the byte count of the leaf under it. The program is a leaf like any bytes handed
- * in, so with a roster it is already sliced across the carrying machines and the taker reads it back through
- * the same door it reads any other row through. `pn` 0 (with `wn` 0) is no program. Which share the taker
- * carries is the taker's own primes, handed to slate_dag_take_ask beside the ask. ---- */
+ * Nothing rides in front of it: no tag byte, no version byte. The construction does not travel — only its word
+ * does. The program is a leaf like any bytes handed in, so with a roster it is already sliced across the
+ * carrying machines and the taker walks it back through the same door it reads any other row through. There is
+ * no count beside the word: the taker walks the cells to the first one nobody has, and the records are the
+ * count. `wn` 0 is no program. Which share the taker carries is the taker's own primes, handed to
+ * slate_dag_take_ask beside the ask. ---- */
 static void ask_put_u32(std::vector<uint8_t> &b, uint32_t v) {
   for (int i = 0; i < 4; i++) b.push_back((uint8_t)(v >> (8 * i)));
 }
@@ -866,9 +866,9 @@ extern "C" int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n) try 
   if (!b || !out || !n) return 1;
   const Slate::Envelope &e = b->arena.env();
   const std::vector<int64_t> &roster = e.channels.roster;
-  /* the program's name, said as its two parts: the word, and the byte count of the leaf under it */
-  const uint8_t *w = nullptr; size_t wn = 0; uint64_t pn = 0;
-  if (!Slate::program_name_read(e.program.data(), e.program.size(), &w, &wn, &pn)) { w = nullptr; wn = 0; pn = 0; }
+  /* the program's word, as it stands: nothing rides beside it */
+  const uint8_t *w = e.program.data();
+  const size_t wn = e.program.size();
   std::vector<uint8_t> a;
   ask_put_u32(a, e.channels.shares);
   ask_put_u32(a, (uint32_t)roster.size());
@@ -877,7 +877,6 @@ extern "C" int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n) try 
   for (int64_t d : b->dims_buf) ask_put_u64(a, (uint64_t)d);
   ask_put_u64(a, (uint64_t)wn);
   a.insert(a.end(), w, w + wn);
-  ask_put_u64(a, pn);
   uint8_t *o = (uint8_t *)std::malloc(a.size());
   if (!o) return 1;
   std::memcpy(o, a.data(), a.size());
@@ -900,19 +899,16 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint6
   if (!r.u64v(wn) || r.cur + wn > r.n) return "args";
   const uint8_t *word = ask + r.cur;
   r.cur += wn;
-  uint64_t pn = 0;
-  if (!r.u64v(pn)) return "args";
-  if ((wn != 0) != (pn != 0)) return "args";   /* a word without its count, or a count without its word */
   /* the roster and the split first, then this machine's own share of it, then what to run and over what. The
      lens goes first so an ask always lands on a fresh statement — a container's old primes are not a reason
      to refuse the roster its ask names. */
   b->arena.env().channels.primes.clear();
   if (const char *rc = slate_dag_roster(b, rk ? roster.data() : nullptr, rk, shares)) return rc;
   if (const char *rc = slate_dag_lens(b, k ? primes : nullptr, k)) return rc;
-  /* the construction does not travel: the ask names it, and this container reads the leaf out of its own store
-     through the same door as any other row — with a roster, the share it carries, gathered whole by the door. */
-  const std::vector<uint8_t> name = wn ? Slate::program_name(word, (size_t)wn, pn) : std::vector<uint8_t>();
-  if (const char *rc = slate_dag_program(b, name.empty() ? nullptr : name.data(), (uint64_t)name.size())) return rc;
+  /* the construction does not travel: the ask names it by its word, and this container walks the leaf out of
+     its own store through the same door as any other row — with a roster, the share it carries, gathered whole
+     by the door. */
+  if (const char *rc = slate_dag_program(b, wn ? word : nullptr, wn)) return rc;
   b->dims_buf = std::move(dims);
   return nullptr;
 } catch (...) { return "internal"; }
@@ -1038,11 +1034,13 @@ extern "C" void slate_array_free(SlateArray *a) {
  * Fragment libraries: a fragment is a serialized DAG piece with typed holes, kept as a leaf. save_fragment
  * records the sub-DAG rooted at a node as normalized builder instructions (the portable source form — never
  * lowered nodes) plus a carrier table (a hole carries only a receipt; a baked constant carries its int64
- * cells) and a crc, keeps those bytes as byte cells under their own word, and hands back the word and the
- * byte count; load reads that leaf back by word and count and validates it fully before the fragment is
- * usable; splice replays it into another builder, so node ids remap and receipts compose at the seam
- * (receipt-in / receipt-out). There is no file and no stream: the store's word already says what the bytes
- * are, so the bytes carry no marker of their own — only the counts they are read by and a crc over the body.
+ * cells) and a crc, keeps those bytes as byte cells under their own word, and hands back that word — the
+ * whole name; load walks that leaf back, cell 0, cell 1, … to the first cell nobody has, and validates it
+ * fully before the fragment is usable; splice replays it into another builder, so node ids remap and receipts
+ * compose at the seam (receipt-in / receipt-out). There is no file and no stream, and nothing outside the
+ * bytes says how many there are: the store's word already says what the bytes are, so they carry no marker of
+ * their own — only the counts the parser reads them by, and a crc over the body, which is what catches a walk
+ * that a lost cell cut short.
  * ---------------------------------------------------------------------------------------------------------- */
 namespace {
 
@@ -1139,8 +1137,8 @@ struct SlateFrag {
 };
 
 extern "C" const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const uint32_t *holes, uint32_t nholes,
-                                       uint8_t **word, uint64_t *wn, uint64_t *pn) try {
-  if (!b || b->err || !word || !wn || !pn || !sd_node_ok(b, root) || (nholes && !holes)) return "args";
+                                       uint8_t **word, uint64_t *wn) try {
+  if (!b || b->err || !word || !wn || !sd_node_ok(b, root) || (nholes && !holes)) return "args";
   /* `root` must carry a stamped reading — read_ can lag the node count, and an emit-supplied id could point
      into that gap (a raw lit / forced big leaf). Refuse rather than read read_ out of bounds. */
   if ((size_t)root >= b->build.reading_count()) return "args";
@@ -1334,14 +1332,15 @@ extern "C" const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const 
   /* The construction, written out, is a leaf: it goes through the same door as any bytes handed in and lands as
      byte cells under the word of (the lens in the clear ‖ the bytes). A leaf already there is a hit and is not
      put again. With a roster the door in front of the store slices it across the carrying machines, so anyone
-     who asks for the word gathers it whole. A store that kept nothing refuses — a program nobody can read is
-     not a program. */
+     who asks for the word gathers it whole by walking the cells. Nothing says how many there are: the records
+     are the count. A store that kept nothing refuses — a program nobody can read is not a program. */
   const Slate::Word key = b->arena.leaf_key(buf.data(), buf.size());
-  if (key.empty() || !Slate::leaf_put(b->arena, key, buf.data(), buf.size())) return "refused";
+  if (key.empty() || !Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, buf.data(), buf.size()))
+    return "refused";
   uint8_t *o = (uint8_t *)std::malloc(key.size());
   if (!o) return "nomem";
   std::memcpy(o, key.data(), key.size());
-  *word = o; *wn = (uint64_t)key.size(); *pn = (uint64_t)buf.size();
+  *word = o; *wn = (uint64_t)key.size();
   return nullptr;
 } catch (const std::bad_alloc &) { return "nomem"; }
   catch (...) { return "internal"; }
@@ -1515,15 +1514,21 @@ static SlateFrag *frag_parse(const uint8_t *p, size_t n) try {
   return f.release();
 } catch (...) { return nullptr; }
 
-/* A program is read by name. `word`/`wn` is the word `slate_dag_save_fragment` handed back and `pn` the byte
- * count of the leaf under it; the bytes come out of this container's store through the same door every other
- * row comes through, so a container carrying a share of a roster gathers the whole leaf and one carrying none
- * reads its own rows. A word the store does not hold — or a share the door could not gather — is a miss and
- * refuses, never a guess. */
-extern "C" SlateFrag *slate_frag_load(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t pn) try {
-  if (!b || !word || !wn || !pn || pn > kFragMaxCount) return nullptr;
+/* A program is read by its word — `slate_dag_save_fragment` handed that word back, and nothing beside it. The
+ * reader walks the cells word ‖ 0, word ‖ 1, … and stops at the first cell nobody has; the records are the
+ * count. The bytes come out of this container's store through the same door every other row comes through, so
+ * a container carrying a share of a roster gathers the whole leaf and one carrying none reads its own rows. A
+ * word the store does not hold is a miss and refuses. A leaf the door could only half gather — a cell on some
+ * carriers but not all — is not whole yet: it refuses too, never a guess and never a short program. A walk cut
+ * short by a store that lost or was fed a bad cell lands on the parser, whose crc and exact-end check refuse
+ * it. */
+extern "C" SlateFrag *slate_frag_load(SlateDag *b, const uint8_t *word, uint64_t wn) try {
+  if (!b || !word || !wn) return nullptr;
   std::vector<uint8_t> bytes;
-  if (!Slate::leaf_get(b->arena, Slate::Word(word, word + wn), (size_t)pn, bytes)) return nullptr;
+  bool partial = false;
+  if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, Slate::Word(word, word + wn), bytes, partial))
+    return nullptr;
+  if (bytes.size() > kFragMaxCount) return nullptr;
   return frag_parse(bytes.data(), bytes.size());
 } catch (...) { return nullptr; }
 
@@ -1641,18 +1646,18 @@ extern "C" const char *slate_dag_splice(SlateDag *b, const SlateFrag *f, const u
 
 extern "C" void slate_frag_free(SlateFrag *f) { delete f; }
 
-/* The executable invariant, in one call: caps -> read the program's leaf by name -> carriers -> splice -> run.
+/* The executable invariant, in one call: caps -> walk the program's leaf by its word -> carriers -> splice -> run.
  * Every consumer (the stdlib runtime, the slate CLI, any language binding) open-coded this same chain; here it
  * is once, over the ordinary C ABI it composes (no engine internals). The container is the caller's, because
  * the store is: a program is a leaf, and which store holds it is what the container says. The SlateArray it
  * returns is an independently owned buffer that outlives the builder, so the caller reads and frees it. Pure —
  * the fragment does any io itself through its granted providers. */
-extern "C" SlateArray *slate_invoke(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t pn,
+extern "C" SlateArray *slate_invoke(SlateDag *b, const uint8_t *word, uint64_t wn,
                                     const uint8_t *const *args, const uint64_t *arg_lens, uint32_t nargs,
                                     const char *const *caps, uint32_t ncaps, const int64_t *dims, uint32_t ndims) try {
   if (!b) return nullptr;
   if (ncaps) slate_dag_effect_caps(b, caps, ncaps);
-  SlateFrag *f = slate_frag_load(b, word, wn, pn);
+  SlateFrag *f = slate_frag_load(b, word, wn);
   if (!f) return nullptr;
   std::vector<uint32_t> carriers;
   carriers.reserve(nargs);
@@ -1767,13 +1772,13 @@ static int frag_splice_impl(Slate::Arena &cx, const uint8_t *prog, uint32_t n, i
   return 0;
 }
 
-/* run: a program is a leaf. The request blob (or the io operand) is the program's name (`word ‖ count`); the
- * effect layer reads the leaf through the store and splices what it finds. Bytes never cross a door, and a word
- * the store does not hold refuses. (Earlier forms — bytes in the blob, a 'C'|carrier_id — were removed: bytes
+/* run: a program is a leaf. The request blob (or the io operand) is the program's word, and nothing beside
+ * it; the effect layer walks the leaf out of the store and splices what it finds. Bytes never cross a door,
+ * and a word the store does not hold refuses. (Earlier forms — bytes in the blob, a 'C'|carrier_id — were removed: bytes
  * are not a name, and a carrier id is a local build handle, not an address.) */
 /* emit: serialize the sub-DAG rooted at the node id encoded in `blob` (an i32), reusing the engine's own
- * save_fragment (normalization + crc), which keeps those bytes as a leaf through the door and hands back the
- * word and the byte count. What comes back here is the program's name, not its bytes. `cx` is a SlateDag's
+ * save_fragment (normalization + crc), which keeps those bytes as a leaf through the door and hands back
+ * their word. What comes back here is the program's name — that word — not its bytes. `cx` is a SlateDag's
  * arena (its first member), so we recover the builder to walk it. Built as an array-effect, which resolves in
  * DagBuild::run step 1 — before effect_eval collapses any effect node — so the target sub-DAG is intact.
  * save_fragment is a pure read of the graph (no force, no mutation), so re-entering it on the in-flight builder
@@ -1788,14 +1793,9 @@ static int frag_emit_impl(Slate::Arena &cx, const uint8_t *blob, uint32_t blen, 
   SlateDag *b = static_cast<SlateDag *>(cx.env().frag_self);
   if (!b || &b->arena != &cx) return 1;
   uint8_t *w = nullptr;
-  uint64_t wn = 0, pn = 0;
-  if (slate_dag_save_fragment(b, node, nullptr, 0, &w, &wn, &pn) != nullptr) return 1;
-  const std::vector<uint8_t> name = Slate::program_name(w, (size_t)wn, pn);
-  std::free(w);
-  uint8_t *o = static_cast<uint8_t *>(std::malloc(name.size()));
-  if (!o) return 1;
-  std::memcpy(o, name.data(), name.size());
-  *out = o; *outn = (uint64_t)name.size();
+  uint64_t wn = 0;
+  if (slate_dag_save_fragment(b, node, nullptr, 0, &w, &wn) != nullptr) return 1;
+  *out = w; *outn = wn;          /* the leaf's word, as save_fragment malloc'd it: the answer is the name */
   return 0;
 }
 

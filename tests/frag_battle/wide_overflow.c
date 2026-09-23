@@ -86,7 +86,7 @@ int main(void) {
 
   MsProg frag = {0};
   build_product_fragment(&frag, N);
-  CHECK(frag.pn > 0, "fragment bytes nonempty");
+  CHECK(frag.wn > 0, "fragment named by a word");
 
   int64_t dims[1] = { (int64_t)N };
 

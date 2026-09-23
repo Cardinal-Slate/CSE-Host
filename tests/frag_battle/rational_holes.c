@@ -83,7 +83,7 @@ int main(void) {
   setvbuf(stdout, NULL, _IONBF, 0);
 
   MsProg qfrag = build_q_sum_fragment();
-  CHECK(qfrag.pn > 0, "Q fragment serialized nonempty");
+  CHECK(qfrag.wn > 0, "Q fragment named by a word");
 
   /* ---- iface: 1 hole, hole domain must be Q; the root iface domain is derive ---- */
   {

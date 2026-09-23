@@ -39,7 +39,7 @@ int main(void) {
     CHECK(rc == NULL, "save_fragment ok (zero-op fragment)");
     slate_dag_free(b);
   }
-  CHECK(frag.pn > 0, "fragment serialized nonempty");
+  CHECK(frag.wn > 0, "fragment named by a word");
 
   /* ---- Load + iface: must report exactly 1 param and 1 hole ---- */
   {

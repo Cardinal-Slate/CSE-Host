@@ -156,7 +156,7 @@ int main(void) {
       CHECK(c00 == 300, "hand arithmetic sanity (C[0][0]=300)");
     }
     MsProg frag = build_matmul_fragment(M, K, D);
-    CHECK(frag.pn > 0, "4x4 fragment serialized nonempty");
+    CHECK(frag.wn > 0, "4x4 fragment named by a word");
     splice_run_verify(&frag, A, B, M, K, D, "4x4x4");
     ms_prog_free(&frag);
   }
@@ -168,7 +168,7 @@ int main(void) {
     for (int t = 0; t < M * K; t++) A[t] = (int64_t)((t * 7 + 3) % 13) - 6;   /* [-6,6] */
     for (int t = 0; t < K * D; t++) B[t] = (int64_t)((t * 5 + 1) % 11) - 5;   /* [-5,5] */
     MsProg frag = build_matmul_fragment(M, K, D);
-    CHECK(frag.pn > 0, "3x5x2 fragment serialized nonempty");
+    CHECK(frag.wn > 0, "3x5x2 fragment named by a word");
     splice_run_verify(&frag, A, B, M, K, D, "3x5x2");
     ms_prog_free(&frag);
   }

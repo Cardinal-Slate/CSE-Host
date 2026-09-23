@@ -26,7 +26,10 @@ typedef struct { int calls; int64_t reply; } Host;
 /* the store, outside the engine: a few (word, bytes) slots behind the region's decode/put callbacks. An effect's
    result is looked up by its word before the host runs, so an identical request is served from here. */
 typedef struct { uint8_t word[64]; uint64_t wn; uint8_t *bytes; uint64_t n; } Slot;
-typedef struct { Slot s[16]; int count; } Store;
+/* An effect's answer is a leaf: one row per byte, under one word per cell. A handful of answers is a
+   few hundred rows, so the slots are sized for the walk, not for one row per answer. */
+#define MS_SLOTS 4096
+typedef struct { Slot s[MS_SLOTS]; int count; } Store;
 static int store_get(const uint8_t *w, uint64_t wn, const uint8_t *sec, uint64_t sn, uint8_t **out, uint64_t *outn, void *u) {
   (void)sec; (void)sn; Store *st = (Store *)u;
   for (int i = 0; i < st->count; i++) if (st->s[i].wn == wn && memcmp(st->s[i].word, w, wn) == 0) {
@@ -35,7 +38,7 @@ static int store_get(const uint8_t *w, uint64_t wn, const uint8_t *sec, uint64_t
 }
 static int store_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n, const uint8_t *sec, uint64_t sn, void *u) {
   (void)sec; (void)sn; Store *st = (Store *)u;
-  if (st->count >= 16 || wn > 64) return 1;
+  if (st->count >= MS_SLOTS || wn > 64) return 1;
   Slot *sl = &st->s[st->count++]; memcpy(sl->word, w, wn); sl->wn = wn; sl->bytes = (uint8_t *)malloc(n ? n : 1); memcpy(sl->bytes, b, n); sl->n = n;
   return 0;
 }

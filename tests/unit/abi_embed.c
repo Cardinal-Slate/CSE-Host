@@ -234,8 +234,8 @@ int main(void) {
   }
 
   /* ---- 7. a program is a leaf: emit names it, run and tail take the name, a name the store lacks refuses.
-     A name is `word ‖ count` — the word, then the leaf's byte count as 8 little-endian bytes — so it is 8
-     bytes longer than a word. ---- */
+     A name is a word and nothing else — the reader walks the leaf's cells to the first one nobody has — so it
+     is exactly a word wide. ---- */
   {
     Store st; memset(&st, 0, sizeof st);
     static const char *const CAP_SELF[] = { "slate.emit", "slate.run", "slate.tail" };
@@ -245,7 +245,7 @@ int main(void) {
     SlateDag *b0 = slate_dag_new(); slate_dag_codec(b0, NULL, st_get, st_put, NULL, 0, &st);
     run1(b0, slate_dag_add(b0, slate_dag_lit(b0, 1), slate_dag_lit(b0, 1)), &v); slate_dag_free(b0);
     CHECK(st.n > 0, "7: no row to learn the word width from");
-    const uint64_t wn = st.n ? st.r[0].wn : 0, nn = wn + 8;   /* a word, and a name: the word and its count */
+    const uint64_t wn = st.n ? st.r[0].wn : 0, nn = wn;   /* a name is a word, and nothing beside it */
 
     /* emit: the sub-DAG 20+22 becomes a leaf; the carrier holds its name, nothing else */
     SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
@@ -267,8 +267,6 @@ int main(void) {
       word[i] = (uint8_t)v;
     }
     CHECK(word_ok, "7: the emitted name could not be read back");
-    { uint64_t pn = 0; for (int i = 0; i < 8; i++) pn |= (uint64_t)word[wn + i] << (8 * i);
-      CHECK(pn > 0, "7: the name carries no byte count"); }
     slate_dag_free(b);
 
     /* a second container over the same store: the name alone runs the program — no bytes crossed */
@@ -287,7 +285,7 @@ int main(void) {
     /* a name the store does not hold refuses: a program that was never kept does not exist */
     SlateDag *b3 = slate_dag_new(); slate_dag_codec(b3, NULL, st_get, st_put, NULL, 0, &st);
     slate_dag_effect_caps(b3, CAP_SELF, 3);
-    uint8_t *junk = (uint8_t *)malloc((size_t)nn);       /* the same count, a word nothing was kept under */
+    uint8_t *junk = (uint8_t *)malloc((size_t)nn);       /* the same width, a word nothing was kept under */
     memcpy(junk, word, (size_t)nn);
     for (uint64_t i = 0; i < wn; i++) junk[i] = (uint8_t)(word[i] ^ 0xA5);
     uint32_t c3 = slate_dag_carrier_bytes(b3, junk, nn);
@@ -307,7 +305,7 @@ int main(void) {
     int64_t v = 0;
     SlateDag *b0 = slate_dag_new(); slate_dag_codec(b0, NULL, st_get, st_put, NULL, 0, &st);
     run1(b0, slate_dag_add(b0, slate_dag_lit(b0, 1), slate_dag_lit(b0, 1)), &v); slate_dag_free(b0);
-    const uint64_t wn = st.n ? st.r[0].wn : 0, nn = wn + 8;
+    const uint64_t wn = st.n ? st.r[0].wn : 0, nn = wn;   /* a name is a word, and nothing beside it */
 
     /* one container emits the leaf 20+22 and reads back its name */
     SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
@@ -343,15 +341,18 @@ int main(void) {
     for (uint64_t i = 0; i < wn; i++) junk[i] = (uint8_t)(word[i] ^ 0x5A);
     slate_dag_program(e, junk, nn);
     CHECK(slate_dag_start(e, &one, 1) == NULL, "8: an unkept program started");
-    /* a word with no count is not a name: it names nothing to start */
-    CHECK(slate_dag_program(e, word, wn) == NULL, "8: setting a bare word refused");
-    CHECK(slate_dag_start(e, &one, 1) == NULL, "8: a bare word started");
+    /* the word alone is the whole name: set it back and the container starts again */
     CHECK(slate_dag_program(e, word, nn) == NULL, "8: setting the program refused");
+    { SlateArray *again = slate_dag_start(e, &one, 1);
+      CHECK(again != NULL, "8: the word alone did not start the program");
+      if (again) { int64_t num = 0, den = 1;
+        CHECK(slate_array_i64_unsafe(again, &num, &den) == NULL && den == 1 && num == 42, "8: restart read %lld (want 42)", (long long)num);
+        slate_array_free(again); } }
     CHECK(slate_dag_program(NULL, word, nn) != NULL, "8: a null builder was accepted");
-    CHECK(slate_dag_program(e, NULL, 4) != NULL, "8: a null name with n > 0 was accepted");
+    CHECK(slate_dag_program(e, NULL, 4) != NULL, "8: a null word with n > 0 was accepted");
     slate_dag_free(e);
     free(word); free(junk); st_free(&st);
-    printf("  program: the leaf a container runs is context; start runs it, and refuses with none, a cleared one, a bare word, or an unkept one\n");
+    printf("  program: the leaf a container runs is context, named by its word alone; start runs it, and refuses with none, a cleared one, or an unkept one\n");
   }
 
   /* ---- 9. the roster, the share, the ask and the cell word: the doors a placement seam uses ---- */
@@ -402,8 +403,8 @@ int main(void) {
       CHECK(slate_dag_ask(b, NULL, &nn) != 0, "9: a null out was accepted");
       CHECK(slate_dag_ask(b, &nul, NULL) != 0, "9: a null length was accepted"); }
     /* the ask reads back exactly what the container carries, in its one fixed order and nothing in front of
-       it: shares, the roster, the dims, and the program's name as its two parts (the word, then the byte
-       count of the leaf under it). The construction itself does not travel. */
+       it: shares, the roster, the dims, and the program's word — nothing beside the word, because the taker
+       walks the leaf's cells to the first one nobody has. The construction itself does not travel. */
     if (askn >= 8) {
       uint32_t shares_r = 0, k_r = 0;
       for (int i = 0; i < 4; i++) shares_r |= (uint32_t)ask[i] << (8 * i);
@@ -416,10 +417,8 @@ int main(void) {
       CHECK(d0 == 4, "9: the ask says dim %llu (want 4)", (unsigned long long)d0);
       uint64_t wn = 0; for (int i = 0; i < 8; i++) wn |= (uint64_t)ask[off + 12 + i] << (8 * i);
       CHECK(wn > 0, "9: the ask names no program — an API-built construction was not kept as a leaf");
-      uint64_t pn = 0; for (int i = 0; i < 8 && off + 20 + wn + 8 <= askn; i++) pn |= (uint64_t)ask[off + 20 + wn + i] << (8 * i);
-      CHECK(pn > 0, "9: the ask carries no byte count — the word alone does not say how much to read");
-      CHECK(askn == off + 28 + wn, "9: the ask is %llu bytes, its own fields say %llu",
-            (unsigned long long)askn, (unsigned long long)(off + 28 + wn));
+      CHECK(askn == off + 20 + wn, "9: the ask is %llu bytes, its own fields say %llu — something rides beside the word",
+            (unsigned long long)askn, (unsigned long long)(off + 20 + wn));
     }
 
     /* the cell word: the reading's word with the cell's index after it */
@@ -456,8 +455,8 @@ int main(void) {
       bad[4] = 0xFF; bad[5] = 0xFF; bad[6] = 0xFF; bad[7] = 0x0F;   /* a roster longer than the ask */
       CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: a roster past the ask's end was taken");
       memcpy(bad, ask, (size_t)askn);
-      { uint64_t off = 8 + 8 * 6, zero = 0; memcpy(bad + off + 20 + 8, &zero, 8); }   /* a word with no count */
-      CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: a word without its count was taken");
+      { uint64_t off = 8 + 8 * 6, huge = 0xFFFFFFFFull; memcpy(bad + off + 12, &huge, 8); }   /* a word past the ask's end */
+      CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: a word past the ask's end was taken");
       CHECK(slate_refused(slate_dag_take_ask(x, ask, 4, share1, 2), "args"), "9: a truncated ask was taken");
       CHECK(slate_dag_take_ask(x, NULL, 0, share1, 2) != NULL, "9: a null ask was taken");
       free(bad); slate_dag_free(x); }

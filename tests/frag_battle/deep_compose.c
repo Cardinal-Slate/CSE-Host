@@ -46,7 +46,7 @@ int main(void) {
     CHECK(rc == NULL, "save fragment F (A*2)");
     slate_dag_free(b);
   }
-  CHECK(fragF.pn > 0, "F serialized nonempty");
+  CHECK(fragF.wn > 0, "F named by a word");
 
   /* sanity: splice F alone, run, check A*2 and exact==1 (baseline seam) */
   {
@@ -98,7 +98,7 @@ int main(void) {
     slate_dag_free(b);
     slate_frag_free(f);
   }
-  CHECK(fragG.pn > 0, "G serialized nonempty");
+  CHECK(fragG.wn > 0, "G named by a word");
 
   /* introspect G: it must report 2 holes and the root PSDA type; learn the hole->carrier order */
   {

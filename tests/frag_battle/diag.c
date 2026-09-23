@@ -26,7 +26,7 @@ int main(int argc, char**argv){
   int32_t p=slate_dag_param(b,0);
   int32_t root=slate_dag_add(b, slate_dag_mul(b, slate_dag_load(b,cidA,p), slate_dag_lit(b,2)), slate_dag_load(b,cidC,p));
   MsProg frag={0}; uint32_t holes[1]={cidA}; ms_keep(b,root,holes,1,&frag); slate_dag_free(b);
-  size_t LEN=(size_t)frag.pn;
+  size_t LEN=ms_leaf_len(&ms_store);   /* what a walk finds: nothing else says how long the leaf is */
   unsigned char *base=(unsigned char*)malloc(LEN);
   if(!ms_leaf_read(&ms_store,LEN,base)){ printf("the leaf's cells are not byte cells\n"); return 2; }
   unsigned char *mut=(unsigned char*)malloc(LEN);

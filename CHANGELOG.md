@@ -2,6 +2,34 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.9.0
+
+- **There is no count anywhere.** Not beside a word, not in a name, not in the ask, not as a row. A leaf is
+  read by walking it — `word ‖ 0`, `word ‖ 1`, … to the first cell nobody has — so the records are the count.
+  Every program reader here walks.
+- **A program's name is its word.** `slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t n)` takes
+  the bare word (the signature is unchanged; what it means is). `Envelope::program`, the tail slot,
+  `"slate.emit"`'s answer, `"slate.run"`'s request and io operand and `"slate.tail"`'s operand all carry that
+  one thing.
+- **Breaking, the three fragment doors lose their count:**
+  - `const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const uint32_t *holes, uint32_t nholes, uint8_t **word, uint64_t *wn)`
+  - `SlateFrag *slate_frag_load(SlateDag *b, const uint8_t *word, uint64_t wn)`
+  - `SlateArray *slate_invoke(SlateDag *b, const uint8_t *word, uint64_t wn, const uint8_t *const *args, const uint64_t *arg_lens, uint32_t nargs, const char *const *caps, uint32_t ncaps, const int64_t *dims, uint32_t ndims)`
+- **Breaking, the ask loses `pn`:**
+  `[shares u32][k u32][roster prime i64]*k [ndims u32][dim i64]*ndims [wn u64][program word u8]*wn`.
+  `wn` 0 is no program. Nothing rides beside the word — the taker walks the leaf out of its own store.
+- **A walk that stops early is the parser's to catch.** Nothing outside the bytes says how long a program is,
+  so a store that lost a cell, or a share that has not landed, hands the parser a short program — and the crc
+  over the body plus the exact-end check refuse it every time. A leaf the door in front of the store could
+  only half gather is reported as not-whole and refuses too: never a guess, never a short program.
+  `tests/unit/engine/frag_cabi.c` checks every stopping point of a leaf; `tests/frag_battle/adversarial_fuzz.c`
+  adds regime C, which does the same under the fuzz harness.
+- **Amplification is 1:1 by construction.** A load is handed no count, so there is nothing to claim four
+  billion of: it allocates only as fast as the walk yields cells, and a store that wants it to allocate a lot
+  must actually hold a lot. The old count-amplification probes are gone with the count they probed.
+- The leaf helpers are CSE-Arena's now (`Slate::leaf_get` / `Slate::leaf_put`, taking `store_env()` and the
+  arena's codec); CSE-Effect's copies are deleted.
+
 ## 0.8.0
 
 - **Everything in the store has one shape, and a program is no exception.** A construction written out as

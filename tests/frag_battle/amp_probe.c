@@ -1,12 +1,14 @@
 /* Targeted probe: does slate_frag_load allocate an attacker-controlled count ahead of the bytes it actually
- * has? A program is a leaf now, so the counts an attacker reaches are (1) the byte count in the name — how
- * many cells the load asks the store for — and (2) the counts in the head of those bytes, which only a lying
- * store can move. Both are probed here, and peak RSS is measured either side: a tiny name driving a large
- * resident set would be a memory-amplification DoS in the decoder.
+ * has? A program is a leaf named by its word and nothing else, so there is no count outside the bytes to
+ * claim four billion of: the load walks the store, cell 0, cell 1, …, and stops at the first cell nobody has,
+ * which means a store that wants it to allocate a lot must actually hold a lot — amplification 1:1, by
+ * construction. The counts an attacker still reaches are the ones in the head of the bytes themselves, which
+ * only a lying store can move, and those are caught by the crc over the body — the whole reason the bytes
+ * still carry one now that no file does.
  *
- * (1) is the new one: the count is a plain argument, so it costs nothing to claim four billion bytes. The
- * load must give that up on the first cell the store does not hold. (2) is caught by the crc over the body,
- * which is the whole reason the bytes still carry one now that no file does. */
+ * Probed here, with peak RSS measured either side: the leaf as kept (control), a lying store that inflates a
+ * count inside the bytes, and a store that lost a cell so the walk stops early. A small leaf driving a large
+ * resident set would be a memory-amplification DoS in the decoder. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +33,8 @@ int main(void){
   MsProg frag={0}; uint32_t holes[1]={cidA};
   ms_keep(b, root, holes, 1, &frag);
   slate_dag_free(b);
-  size_t LEN=(size_t)frag.pn;
-  printf("fragment length = %zu bytes, kept as %zu rows\n", LEN, ms_store.rows);
+  size_t LEN=ms_leaf_len(&ms_store);    /* what a walk finds: nothing else says how long the leaf is */
+  printf("fragment length = %zu bytes, kept as %zu rows (the records are the count)\n", LEN, ms_store.rows);
 
   unsigned char *base=(unsigned char*)malloc(LEN);
   if(!ms_leaf_read(&ms_store,LEN,base)){ printf("FAIL: the leaf's cells are not byte cells\n"); return 2; }
@@ -49,10 +51,13 @@ int main(void){
   { SlateFrag*f=ms_load(&frag); printf("control load -> %s\n", f?"loaded":"null"); if(f) slate_frag_free(f); }
   printf("maxrss after control: %ld bytes\n", maxrss_bytes());
 
-  /* attack 1: the name claims four billion bytes. Nothing was kept under those cells, so the load must give
-     up on the first one it asks for. */
-  { MsProg big = frag; big.pn = 0xFFFFFFFFull;
-    SlateFrag*f=ms_load(&big); printf("attack (count=2^32-1) load -> %s\n", f?"loaded":"null(rejected)"); if(f) slate_frag_free(f); }
+  /* attack 1 is gone: there is no count beside the word to claim. What used to be "the name says four
+     billion bytes" is now "the store would have to hold four billion cells", which costs the attacker exactly
+     what it costs the reader. What is left is the store losing a cell: the walk stops there and the parser
+     must refuse the short program rather than run it. */
+  { ms_leaf_stop_after(&ms_store, LEN/2);
+    SlateFrag*f=ms_load(&frag); printf("attack (walk stops at %zu of %zu) load -> %s\n", LEN/2, LEN, f?"LOADED(bug)":"null(rejected)"); if(f) slate_frag_free(f);
+    ms_leaf_stop_after(&ms_store, LEN); }
 
   /* attack 2: a lying store — the baked-data length word says 50,000,000 int64 cells (= 400MB), the crc fixed
      so integrity would pass if the crc were all that stood between the count and the allocator. */
@@ -73,7 +78,7 @@ int main(void){
   long after = maxrss_bytes();
   printf("maxrss after attack: %ld bytes  (delta = %ld bytes = %.1f MB)\n", after, after-before, (after-before)/1e6);
   double amp = (double)(after-before)/(double)LEN;
-  printf("AMPLIFICATION: ~%.0fx  (resident bytes per leaf byte)\n", amp);
+  printf("AMPLIFICATION: ~%.0fx  (resident bytes per leaf byte the store actually holds)\n", amp);
   if (after-before > 100*1000*1000) printf("VERDICT: memory-amplification CONFIRMED (>100MB from a %zu-byte leaf)\n", LEN);
   else printf("VERDICT: no significant amplification\n");
   free(base); ms_prog_free(&frag); ms_free(&ms_store);

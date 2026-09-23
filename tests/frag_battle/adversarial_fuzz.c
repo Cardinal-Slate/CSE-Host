@@ -1,11 +1,12 @@
 /* Adversarial fuzz of the fragment decoder (slate_frag_load) against an untrusted store.
  *
  * Keep one valid fragment  root[i] = A[i]*2 + C[i]  (A a hole, C baked {10,20,30,40}) as a leaf, then mutate
- * the bytes the store hands back for that leaf's cells and load it by name every time. There is no file to
- * corrupt any more: a program is a leaf, so the only thing that can lie to a load is the store it reads from,
- * and that is what is fuzzed here — one cell of a leaf is one byte of the program. Invariant under test: load
- * must neither crash nor hand back a fragment that, spliced and run, yields a wrong value; it either rejects
- * (NULL) or loads to a fragment that runs to an exact value.
+ * the bytes the store hands back for that leaf's cells — and which cells it has at all — and load it by its
+ * word every time. There is no file to corrupt any more and no count to lie about: a program is a leaf, so the
+ * only thing that can lie to a load is the store it walks, and that is what is fuzzed here — one cell of a
+ * leaf is one byte of the program, and how far the walk gets is the program's length. Invariant under test:
+ * load must neither crash nor hand back a fragment that, spliced and run, yields a wrong value; it either
+ * rejects (NULL) or loads to a fragment that runs to an exact value.
  *
  * Each candidate is loaded (and, if accepted, spliced and run) in a forked child under an address-space
  * rlimit, so a segfault, abort, or pathological allocation cannot kill the parent; the parent reads a child
@@ -17,8 +18,13 @@
  *      {12,24,36,48}; anything else is a decoder bug.
  *   B. crc-consistent header/count probes: overwrite ninstr@24 / root@32 / nparams@40 / ncarrier@48 / pot@56
  *      and the baked-data length word with adversarial values, then recompute the crc so integrity passes.
- *      This forces the structural bounds checks to decide. An accepted load may be a different but valid
- *      fragment; it must still run without crashing to a defined exact value.
+ *      These counts live inside the bytes, which is the only place a count is left; the word outside them
+ *      carries none. This forces the structural bounds checks to decide. An accepted load may be a different
+ *      but valid fragment; it must still run without crashing to a defined exact value.
+ *   C. the walk stops early: hide the leaf's cells from some index on, so the reader stops at the first cell
+ *      nobody has and hands the parser a short program, its crc unrepaired. Nothing recorded the leaf's
+ *      length, so the parser is the only thing that can catch this — and it must, at every stopping point.
+ *      Every one of these must be rejected; an accepted one is a bug, whatever it would run to.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,22 +52,14 @@ static MsProg g_frag;
  *   11 accepted, wrong value / bad domain (a decoder bug)
  *   12 accepted, run refused cleanly (splice/run returned a defined refusal -- safe)
  * A crash inside slate_frag_load / splice / run makes the child die by signal; the parent sees WIFSIGNALED. */
-/* The loader reserves a bounded prefix and grows by push_back in <=8 MB chunks rather than resizing to an
- * attacker-controlled header count, so a lying count allocates only as fast as the stream yields bytes and a
- * short or malicious stream fails on the first missing byte after a bounded grow. Every mutant, including
- * huge count fields, runs through the real loader and must return NULL cheaply; the screen below is a
- * disabled no-op kept to document the former eager-allocation hazard. */
-static int eager_alloc_screen(const unsigned char *buf, size_t len) {
-  (void)buf; (void)len;
-  return 0;   /* loader is incremental now — run everything for real; a huge count just streams dry -> NULL */
-}
-
+/* A load allocates only as fast as the walk yields cells: it asks for cell 0, then cell 1, and stops at the
+ * first one nobody has. No count is handed to it from outside, so there is nothing to claim four billion of —
+ * a store that wants a load to allocate a lot must actually hold a lot. The counts inside the bytes (regime B)
+ * are grown into, never resized to, so a lying one just runs the walk dry and returns NULL. */
 static int child_run(const unsigned char *buf, size_t len, int enforce_orig) {
-  int scr = eager_alloc_screen(buf, len);
-  if (scr) return scr;
   ms_leaf_write(&ms_store, buf, len);        /* the store now hands back these bytes for this leaf's cells */
-  MsProg cand = g_frag; cand.pn = len;       /* the name, with the count the candidate claims */
-  SlateFrag *f = ms_load(&cand);
+  ms_leaf_stop_after(&ms_store, len);        /* ...and has exactly this many of them: the walk ends here */
+  SlateFrag *f = ms_load(&g_frag);
   if (!f) return 0;
   uint32_t nparams = 0, nholes = 0;
   if (slate_frag_iface(f, &nparams, NULL, &nholes, NULL) != NULL) { slate_frag_free(f); return 12; }
@@ -123,7 +121,7 @@ static void evaluate(const unsigned char *buf, size_t len, int enforce_orig, con
     case 0:  n_reject++; break;
     case 10: n_exact++;  break;
     case 12: n_refuse++; break;
-    case 13: case 14: n_dos++; break;              /* screened: loader would eagerly allocate multi-GB */
+    case 13: case 14: n_dos++; break;              /* reserved: nothing screens candidates out any more */
     case 11: n_wrong++;  fails++; printf("WRONG-VALUE accepted: %s\n", tag); break;
     default: n_crash++;  fails++; printf("UNEXPECTED child code=%d: %s\n", code, tag); break;
   }
@@ -146,7 +144,7 @@ int main(void) {
     if (rc != NULL) { printf("FAIL: save_fragment rc=%s\n", rc); return 2; }
     slate_dag_free(b);
   }
-  size_t LEN = (size_t)g_frag.pn;
+  size_t LEN = ms_leaf_len(&ms_store);       /* what a walk finds: nothing else says how long the leaf is */
   printf("fragment length = %zu bytes (%zu rows in the table)\n", LEN, ms_store.rows);
 
   unsigned char *base = (unsigned char *)malloc(LEN + 64);
@@ -220,7 +218,8 @@ int main(void) {
       evaluate(mut, LEN, 0, tag);
     }
   }
-  /* truncation at every boundary, crc recomputed for the truncated span */
+  /* the walk stopping short, with the crc repaired over the shorter span: a store that both lost cells and
+     fixed up what is left. The structural bounds are all that is left to decide. */
   for (size_t tl=12; tl<LEN; tl++) {
     memcpy(mut,base,tl);
     if (tl>=4){uint32_t c=crc_calc(mut,tl-4); memcpy(mut+tl-4,&c,4);}
@@ -233,12 +232,27 @@ int main(void) {
   printf("REGIME B done: total=%ld reject=%ld exact=%ld refuse=%ld wrong=%ld segv=%ld dos=%ld\n",
          b_total,b_reject,b_exact,b_refuse,b_wrong,b_crash,b_dos);
 
+  long c_before_reject=n_reject, c_before_other=n_exact+n_refuse+n_wrong+n_crash+n_dos;
+
+  /* ---------------- Regime C: the walk stops early ---------------- */
+  /* Every cell up to `tl` is the leaf's own byte; from `tl` on, nobody has it. The reader stops there and the
+     parser is handed a short program whose crc was never repaired. Nothing outside the bytes said how long
+     the leaf was, so the parser is the only check — and every one of these must be rejected. */
+  for (size_t tl=0; tl<LEN; tl++) {
+    memcpy(mut,base,LEN);
+    char tag[56]; snprintf(tag,sizeof tag,"C.walk-stops-at=%zu",tl);
+    evaluate(mut, tl, 0, tag);
+  }
+  long c_reject=n_reject-c_before_reject, c_other=(n_exact+n_refuse+n_wrong+n_crash+n_dos)-c_before_other;
+  printf("REGIME C done: walks=%zu reject=%ld not-rejected=%ld\n", LEN, c_reject, c_other);
+  if (c_other != 0) { printf("FAIL: a walk that stopped early was parsed into a fragment (%ld of %zu)\n", c_other, LEN); fails++; }
+
   free(mut); free(base); ms_prog_free(&g_frag); ms_free(&ms_store);
-  printf("SUMMARY: A_muts=%ld B_muts=%ld  SEGV=%ld WRONG=%ld DoS=%ld  (reject=%ld exact=%ld refuse=%ld)\n",
-         a_total,b_total,n_crash,n_wrong,n_dos,n_reject,n_exact,n_refuse);
-  printf("NOTE: DoS=%ld — the loader now reads counts incrementally (bounded reserve + <=8MB grow steps), so a\n"
-         "      huge count field just streams dry and returns NULL; no upfront attacker-controlled allocation.\n", n_dos);
-  if (fails==0){ printf("PASS adversarial_fuzz: no memory-safety crash, no wrong-valued fragment across %ld mutations\n",a_total+b_total); return 0; }
+  printf("SUMMARY: A_muts=%ld B_muts=%ld C_walks=%zu  SEGV=%ld WRONG=%ld DoS=%ld  (reject=%ld exact=%ld refuse=%ld)\n",
+         a_total,b_total,LEN,n_crash,n_wrong,n_dos,n_reject,n_exact,n_refuse);
+  printf("NOTE: DoS=%ld — a load is handed no count at all; it walks the store cell by cell and stops at the\n"
+         "      first cell nobody has, so a store that wants it to allocate a lot must actually hold a lot.\n", n_dos);
+  if (fails==0){ printf("PASS adversarial_fuzz: no memory-safety crash, no wrong-valued fragment across %ld mutations and %zu short walks\n",a_total+b_total,LEN); return 0; }
   printf("FAIL adversarial_fuzz: %d memory-safety/correctness problem(s) (segv=%ld wrong=%ld)\n",fails,n_crash,n_wrong);
   return 1;
 }

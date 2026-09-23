@@ -105,7 +105,7 @@ int main(void) {
 
   /* ===== Target 1: A + B - A  == B ===== */
   MsProg f1 = build_add_sub();
-  CHECK(f1.pn > 0, "T1 fragment nonempty");
+  CHECK(f1.wn > 0, "T1 fragment named by a word");
 
   /* iface: exactly 2 holes, slots 0 and 1 in order, both array-kind */
   {
@@ -157,7 +157,7 @@ int main(void) {
 
   /* ===== Target 2: A*B + A == A*(B+1) ===== */
   MsProg f2 = build_mul_add();
-  CHECK(f2.pn > 0, "T2 fragment nonempty");
+  CHECK(f2.wn > 0, "T2 fragment named by a word");
   {
     int64_t out[N] = {0};
     int rc = splice_run2(&f2, A, B, out);

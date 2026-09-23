@@ -78,7 +78,7 @@ int main(void) {
 
   /* 1. build + save; the fragment must be nonempty and carry the baked offset table. */
   MsProg frag = build_and_save();
-  CHECK(frag.pn > 0, "fragment serialized nonempty");
+  CHECK(frag.wn > 0, "fragment named by a word");
 
   /* 1b. iface: exactly 1 hole (A), 1 param; the offset is not a hole (it baked in). */
   {
@@ -134,7 +134,7 @@ int main(void) {
     /* nholes = 0: Qc is read by root but not a hole, so save must try to bake it. */
     const char *rc = ms_keep(b, root, /*holes=*/NULL, 0, &out);
     CHECK(slate_refused(rc, "args"), "save_fragment refuses to BAKE a rational carrier with EARGS");
-    CHECK(out.pn == 0, "no bytes emitted on the refused bake");
+    CHECK(out.wn == 0, "no name handed back on the refused bake");
     ms_prog_free(&out);
     slate_dag_free(b);
   }
@@ -152,7 +152,7 @@ int main(void) {
     const char *rc = ms_keep(b, root, holes, 1, &out);
     CHECK(rc == NULL, "save_fragment ACCEPTS a rational carrier as a HOLE (Q hole ok)");
     /* the hole's receipt should read Q. */
-    if (rc == NULL && out.pn > 0) {
+    if (rc == NULL && out.wn > 0) {
       SlateFrag *f = ms_load(&out);
       CHECK(f != NULL, "Q-hole fragment loads back");
       if (f) {

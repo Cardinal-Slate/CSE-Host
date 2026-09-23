@@ -150,20 +150,20 @@ int main(void) {
     st_free(&st);
   }
 
-  /* ---- 4. a fragment is the interchange unit: keep it as a leaf with the binaries as holes, load it back by
-     name in a fresh container over the same store, splice over new ones, invoke ---- */
+  /* ---- 4. a fragment is the interchange unit: keep it as a leaf with the binaries as holes, walk it back by
+     its word in a fresh container over the same store, splice over new ones, invoke ---- */
   {
     uint8_t G[40]; random_bytes(G, 40, 17);
     Store st; memset(&st, 0, sizeof st);
     SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
     Pair p = build(b, G, 40, 3, 5);
     int32_t root = slate_dag_div(b, p.A, p.B);
-    uint8_t *fw = NULL; uint64_t fwn = 0, fpn = 0; uint32_t holes[2] = { p.ca, p.cb };
-    CHECK(slate_dag_save_fragment(b, root, holes, 2, &fw, &fwn, &fpn) == NULL, "4: keep refused");
+    uint8_t *fw = NULL; uint64_t fwn = 0; uint32_t holes[2] = { p.ca, p.cb };
+    CHECK(slate_dag_save_fragment(b, root, holes, 2, &fw, &fwn) == NULL, "4: keep refused");
     slate_dag_free(b);
     /* another container, the same store: a program one kept is loaded by name by another */
     SlateDag *lb = slate_dag_new(); slate_dag_codec(lb, NULL, st_get, st_put, NULL, 0, &st);
-    SlateFrag *f = slate_frag_load(lb, fw, fwn, fpn); CHECK(f, "4: load refused");
+    SlateFrag *f = slate_frag_load(lb, fw, fwn); CHECK(f, "4: load refused");
     uint32_t np = 0, nh = 0; slate_iface_receipt rr; CHECK(slate_frag_iface(f, &np, NULL, &nh, &rr) == NULL && nh == 2, "4: iface: %u holes (want 2)", nh);
     CHECK(rr.kind && strcmp(rr.kind, "scalar") == 0 && (!rr.domain || strcmp(rr.domain, "Q") == 0), "4: root receipt %s/%s (want scalar, Q or derived)", rr.kind ? rr.kind : "?", rr.domain ? rr.domain : "derived");
     /* splice over new binaries A' = 7·G', B' = 2·G' of the same lengths (the record reads a fixed window of each hole —
@@ -180,18 +180,18 @@ int main(void) {
     /* invoke by name: the program's name and the two binaries, one call, in a container over the same store */
     { const uint8_t *av[2] = { A2, B2 }; uint64_t al[2] = { na, nb };
       SlateDag *iv = slate_dag_new(); slate_dag_codec(iv, NULL, st_get, st_put, NULL, 0, &st);
-      SlateArray *a = slate_invoke(iv, fw, fwn, fpn, av, al, 2, NULL, 0, NULL, 0); Reading r;
+      SlateArray *a = slate_invoke(iv, fw, fwn, av, al, 2, NULL, 0, NULL, 0); Reading r;
       CHECK(a && read1(a, &r) == 0 && r.sign == 0 && r.num == 7 && r.den == 2, "4: invoke read %llu/%llu", (unsigned long long)r.num, (unsigned long long)r.den);
       slate_array_free(a); slate_dag_free(iv); }
     /* a word no store holds is a miss: nothing to invoke */
     { uint8_t *junk = (uint8_t *)malloc((size_t)fwn); for (uint64_t i = 0; i < fwn; i++) junk[i] = (uint8_t)(fw[i] ^ 0xA5);
       SlateDag *iv = slate_dag_new(); slate_dag_codec(iv, NULL, st_get, st_put, NULL, 0, &st);
-      CHECK(slate_invoke(iv, junk, fwn, fpn, NULL, NULL, 0, NULL, 0, NULL, 0) == NULL, "4: an unkept name was invoked");
+      CHECK(slate_invoke(iv, junk, fwn, NULL, NULL, 0, NULL, 0, NULL, 0) == NULL, "4: an unkept name was invoked");
       slate_dag_free(iv); free(junk); }
     /* wrong arity refuses before any node is emitted */
     { SlateDag *d = slate_dag_new(); int32_t r3 = 0; CHECK(slate_refused(slate_dag_splice(d, f, args, 1, &r3), "args") && r3 == -1, "4: wrong arity not refused"); slate_dag_free(d); }
     slate_frag_free(f); slate_dag_free(lb);
-    printf("  fragment: A/B kept with two holes (%llu bytes as byte cells), loaded by name (scalar), spliced over 7·G'/2·G' reads 7/2, invoked by name reads 7/2\n", (unsigned long long)fpn);
+    printf("  fragment: A/B kept with two holes (one byte cell per byte, walked back), loaded by its word (scalar), spliced over 7·G'/2·G' reads 7/2, invoked by its word reads 7/2\n");
     free(fw); st_free(&st);
   }
 

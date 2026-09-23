@@ -61,10 +61,12 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
  *          roster). That is the one split rule; the placement door in front of the engine runs the same
  *          arithmetic, so both name the same share.
  * ask      the bytes that let any machine run the same construction on its own share (slate_dag_ask).
- * leaf     bytes handed in, or a construction written out: one cell per byte under its own word, the same
- *          shape as every other row. A program is a leaf — never a file, never bytes inside an ask.
- * name     how a program is carried in one byte string: `word ‖ count` (the word, then the leaf's byte count
- *          as 8 little-endian bytes). */
+ * leaf     bytes handed in, or a construction written out: one cell per byte under its own word, on the whole
+ *          lens that word carries, the same shape as every other row. A program is a leaf — never a file,
+ *          never bytes inside an ask.
+ * walk     how a leaf is read back: word ‖ 0, word ‖ 1, … to the first cell nobody has. Nothing says how many
+ *          there are — the records are the count.
+ * name     how a program is carried: its word, and nothing beside it. */
 
 /// Pin the channels this container computes: it computes those channels of every value and no others. A share
 /// that cannot certify a value alone refuses rather than handing back a partial one, so a pinned host is never
@@ -111,37 +113,34 @@ const char *slate_dag_shares(SlateDag *b, uint32_t shares);
 /* ---- the ask: a container's run context, as bytes ----
  *
  * The ask is what one machine hands another so it runs the same construction on its own share: the program's
- * name, the dims the last dispatch ran over, the roster and the shares. The construction itself does not
+ * word, the dims the last dispatch ran over, the roster and the shares. The construction itself does not
  * travel — a program is a leaf like any bytes handed in, so with a roster it is already sliced across the
- * carrying machines and the taker reads it back through the same door it reads any other row through. Which
+ * carrying machines and the taker walks it back through the same door it reads any other row through. Which
  * share the taker carries is the taker's own primes, handed to slate_dag_take_ask beside the ask.
  *
  * The format is Host's, little-endian, fixed order, byte exact. Nothing rides in front of it — no tag byte,
  * no version byte:
  *
  *     [shares u32][k u32][roster prime i64] * k
- *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn [pn u64]
+ *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn
  *
- * `k` 0 = no roster (this container's own lens is the whole one). `wn` 0 with `pn` 0 = no program: the
- * container names no construction, and a taker of that ask has nothing to start. `pn` is the byte count of the
- * leaf under the word — a leaf is read back by its cell count, so the count travels with the word wherever one
- * goes. A reader bounds-checks every field against the ask's end and refuses a short or malformed ask rather
- * than guessing at the bytes. */
+ * `k` 0 = no roster (this container's own lens is the whole one). `wn` 0 = no program: the container names no
+ * construction, and a taker of that ask has nothing to start. Nothing rides beside the word — the taker walks
+ * the leaf's cells to the first one nobody has, and the records are the count. A reader bounds-checks every
+ * field against the ask's end and refuses a short or malformed ask rather than guessing at the bytes. */
 
 /// The container's run context as an ask. Writes a malloc'd buffer to *out/*n — the caller frees it with
 /// free(). The dims are the last dispatch's (slate_dag_run or slate_dag_start); a container that has not run
-/// carries none, and the ask says ndims 0. A container whose program name is not a name (a word without its
-/// count) asks with wn 0 and pn 0 rather than naming half of one.
+/// carries none, and the ask says ndims 0. A container that names no program asks with wn 0.
 /// @return 0; nonzero on a null argument or a buffer that could not be allocated.
 int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n);
 
 /// Configure this container from an ask, with `primes` as its lens — the share this machine carries. Sets the
 /// roster and shares the ask names, then the lens (which must be one share of that roster), then the program's
-/// name and the dims. Nothing is kept here: the ask carries no bytes, and the program is read out of this
+/// word and the dims. Nothing is kept here: the ask carries no bytes, and the program is walked out of this
 /// container's own store when it is started. A container configured this way starts with slate_dag_start.
-/// @return NULL; "args" on a null builder, a null/short ask, bytes that run past the ask's end, a word without
-///         its byte count (or a count without its word), a roster the pool's rule refuses, or `primes` that
-///         are not one share of the ask's roster.
+/// @return NULL; "args" on a null builder, a null/short ask, bytes that run past the ask's end, a roster the
+///         pool's rule refuses, or `primes` that are not one share of the ask's roster.
 const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint64_t n, const int64_t *primes, uint32_t k);
 
 /// The word of cell `i` of a reading: the reading's own word with the cell's index after it, the same name the
@@ -152,26 +151,25 @@ const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint64_t n, cons
 const char *slate_array_cell_word(const SlateArray *a, uint64_t i, uint8_t **out, uint64_t *n);
 
 
-/// The program this container runs: the name of a leaf — `word ‖ count`, the word's bytes followed by the
-/// program's byte count as 8 little-endian bytes (slate_dag_save_fragment hands the two back separately; the
-/// "slate.emit" answer and the "slate.tail" hand-off carry them in exactly this one spelling). Context, like
-/// the lens — not a node. slate_dag_start runs it through the run trampoline: the leaf is read from the store
-/// by word and count, spliced into a fresh arena sharing this container (grant / fds / providers), run, and if
-/// it hands off with "slate.tail" the next name is run the same way, until a tick hands off to nothing. `n` 0
-/// clears it.
+/// The program this container runs: the word of a leaf, and nothing beside it (slate_dag_save_fragment hands
+/// that word back; the "slate.emit" answer and the "slate.tail" hand-off carry the same one thing). Context,
+/// like the lens — not a node. slate_dag_start runs it through the run trampoline: the leaf is walked out of
+/// the store — word ‖ 0, word ‖ 1, … to the first cell nobody has — spliced into a fresh arena sharing this
+/// container (grant / fds / providers), run, and if it hands off with "slate.tail" the next word is run the
+/// same way, until a tick hands off to nothing. `n` 0 clears it.
 ///
 /// A container that carries a roster sets this itself if nothing else has: at the first slate_dag_run with a
 /// roster set and no program, the construction being run is kept as a leaf (its bytes, one cell per byte, under
-/// their own word) and that name becomes the program — so the ask this container hands another machine names
+/// their own word) and that word becomes the program — so the ask this container hands another machine names
 /// the construction rather than carrying it. A construction that cannot be saved as a fragment (an RNS/ℚ, f32
 /// or wide carrier is not fragment-addressable — see slate_dag_save_fragment), or one no store would keep, is
-/// not kept, the run is unaffected, and the ask then names no program. Clear the name to let the next dispatch
+/// not kept, the run is unaffected, and the ask then names no program. Clear the word to let the next dispatch
 /// name a new one.
-/// @return NULL; "args" on a null builder or a null name with n > 0.
-const char *slate_dag_program(SlateDag *b, const uint8_t *name, uint64_t n);
+/// @return NULL; "args" on a null builder or a null word with n > 0.
+const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t n);
 /// Start the container: run the program its context names (slate_dag_program) over `dims`. Returns the reading
-/// of the last tick, or NULL when no program is set, the store does not hold the leaf the name points at, or a
-/// tick refuses. An entrypoint is a store, a secret and a name; nothing in it is a graph. `dims` NULL with `ndims` 0 runs over
+/// of the last tick, or NULL when no program is set, the store does not hold the leaf the word names (or holds
+/// only part of it), or a tick refuses. An entrypoint is a store, a secret and a word; nothing in it is a graph. `dims` NULL with `ndims` 0 runs over
 /// the dims the container already carries — the ones an ask brought (slate_dag_take_ask) or the last dispatch
 /// recorded — and refuses when it carries none.
 SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_t ndims);

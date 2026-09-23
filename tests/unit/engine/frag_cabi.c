@@ -1,10 +1,11 @@
 /* The fragment-library door from pure C (slate/slate.h). No C++ in this translation unit. Builds a fragment
  * with one hole (A) and one baked constant carrier (C), computing root[i] = A[i]*2 + C[i] over grid[i]; keeps
- * it as a leaf through the store (one cell per byte, under its own word), loads it back by that word and byte
- * count, checks the interface, splices it into two fresh builders with different A data, runs, and verifies
- * the exact cells. Then it exercises robustness (an unkept word, a wrong count, a store that hands back a
- * different byte, a huge count — every one refuses), the size-then-fill iface path, splice typecheck refusals,
- * and the mulh/asr prims.
+ * it as a leaf through the store (one cell per byte, under its own word), walks it back by that word — cell 0,
+ * cell 1, … to the first cell nobody has, because nothing anywhere says how many there are — checks the
+ * interface, splices it into two fresh builders with different A data, runs, and verifies the exact cells.
+ * Then it exercises robustness (an unkept word, an empty word, a store that hands back a different byte, a
+ * store that lost a cell so the walk stops early — every one refuses), the size-then-fill iface path, splice
+ * typecheck refusals, and the mulh/asr prims.
  *
  * A program is a leaf, so a fragment only exists where a store kept it: every builder here is handed the one
  * table in `memstore.h`, which is also how one container loads what another kept. */
@@ -14,9 +15,9 @@
 #include "slate/slate.h"
 #include "../../memstore.h"
 
-/* a program's name, as the doors hand it back: the word and the leaf's byte count */
-typedef struct { uint8_t *w; uint64_t wn, pn; } Prog;
-static void prog_free(Prog *p) { free(p->w); p->w = NULL; p->wn = p->pn = 0; }
+/* a program's name, as the doors hand it back: its word, and nothing beside it */
+typedef struct { uint8_t *w; uint64_t wn; } Prog;
+static void prog_free(Prog *p) { free(p->w); p->w = NULL; p->wn = 0; }
 
 static MemStore store;
 static int fails = 0;
@@ -37,18 +38,18 @@ static Prog build_and_save(void) {
   int32_t root = slate_dag_add(b, m, lC);
   Prog out = {0};
   uint32_t holes[1] = {cidA};
-  const char *rc = slate_dag_save_fragment(b, root, holes, 1, &out.w, &out.wn, &out.pn);
+  const char *rc = slate_dag_save_fragment(b, root, holes, 1, &out.w, &out.wn);
   CHECK(rc == NULL, "save_fragment ok");
   slate_dag_free(b);
   return out;
 }
 
-/* load the program by name into a fresh container over the same store, splice it over A, run on grid[4], and
-   read the 4 int64 cells into out[4]. */
+/* walk the program back by its word into a fresh container over the same store, splice it over A, run on
+   grid[4], and read the 4 int64 cells into out[4]. */
 static int splice_run(const Prog *frag, const int64_t A[4], int64_t out[4]) {
   SlateDag *b = slate_dag_new();
   MS_INSTALL(b, &store);
-  SlateFrag *f = slate_frag_load(b, frag->w, frag->wn, frag->pn);
+  SlateFrag *f = slate_frag_load(b, frag->w, frag->wn);
   if (!f) { slate_dag_free(b); return -1000; }
   uint32_t cidA = slate_dag_carrier(b, A, 4);
   uint32_t args[1] = {cidA};
@@ -72,10 +73,10 @@ static int splice_run(const Prog *frag, const int64_t A[4], int64_t out[4]) {
 }
 
 /* a container over the one store, for a load that is expected to refuse */
-static SlateFrag *load_by(const uint8_t *w, uint64_t wn, uint64_t pn, SlateDag **keep) {
+static SlateFrag *load_by(const uint8_t *w, uint64_t wn, SlateDag **keep) {
   SlateDag *b = slate_dag_new();
   MS_INSTALL(b, &store);
-  SlateFrag *f = slate_frag_load(b, w, wn, pn);
+  SlateFrag *f = slate_frag_load(b, w, wn);
   if (keep) *keep = b; else slate_dag_free(b);
   return f;
 }
@@ -86,13 +87,13 @@ int main(void) {
 
   /* 1. round-trip + splice + run */
   Prog frag = build_and_save();
-  CHECK(frag.pn > 0 && frag.wn > 0, "fragment kept as a leaf, named by word and count");
-  CHECK(store.rows >= frag.pn, "the leaf is one row per byte");
+  CHECK(frag.wn > 0, "fragment kept as a leaf, named by its word and nothing else");
+  CHECK(store.rows > 0 && store.rows == ms_leaf_len(&store), "the leaf is one row per byte, and that is its length");
 
   /* 2. iface */
   {
     SlateDag *hb = NULL;
-    SlateFrag *f = load_by(frag.w, frag.wn, frag.pn, &hb);
+    SlateFrag *f = load_by(frag.w, frag.wn, &hb);
     CHECK(f != NULL, "frag_load ok");
     if (f) {
       uint32_t np = 0, nh = 0;
@@ -128,18 +129,15 @@ int main(void) {
     CHECK(out2[0] == 210 && out2[1] == 20 && out2[2] == 20 && out2[3] == 54, "splice_run #2 values");
   }
 
-  /* 4. robustness: a word nothing was kept under, a count short of the leaf, a count past it — every one
-   *    refuses (NULL), no crash. There is no file to corrupt any more: what a load can be handed wrong is the
-   *    name, and what can lie to it is the store. */
+  /* 4. robustness: a word nothing was kept under, and an empty word — both refuse (NULL), no crash. There is
+   *    no file to corrupt any more and no count to lie about: all a load is handed is a word, and what can lie
+   *    to it is the store it walks. */
   {
     uint8_t *junk = (uint8_t *)malloc((size_t)frag.wn);
     for (uint64_t i = 0; i < frag.wn; i++) junk[i] = (uint8_t)(frag.w[i] ^ 0xA5);
-    CHECK(load_by(junk, frag.wn, frag.pn, NULL) == NULL, "a word nothing was kept under refused");
+    CHECK(load_by(junk, frag.wn, NULL) == NULL, "a word nothing was kept under refused");
     free(junk);
-    CHECK(load_by(frag.w, frag.wn, frag.pn - 3, NULL) == NULL, "a count short of the leaf refused");
-    CHECK(load_by(frag.w, frag.wn, frag.pn + 3, NULL) == NULL, "a count past the leaf refused");
-    CHECK(load_by(frag.w, 0, frag.pn, NULL) == NULL, "an empty word refused");
-    CHECK(load_by(frag.w, frag.wn, 0, NULL) == NULL, "a zero count refused");
+    CHECK(load_by(frag.w, 0, NULL) == NULL, "an empty word refused");
   }
 
   /* 4a. a store that hands back a different byte: the crc over the body catches it. One cell of the leaf is
@@ -156,16 +154,16 @@ int main(void) {
                                slate_dag_load(kb, cc, pp));
     Prog one = {0};
     uint32_t hs[1] = {ca};
-    CHECK(slate_dag_save_fragment(kb, rt, hs, 1, &one.w, &one.wn, &one.pn) == NULL, "leaf kept in its own table");
+    CHECK(slate_dag_save_fragment(kb, rt, hs, 1, &one.w, &one.wn) == NULL, "leaf kept in its own table");
     slate_dag_free(kb);
-    CHECK(only.rows == one.pn, "the table holds exactly one row per program byte");
+    CHECK(only.rows > 0 && only.rows == ms_leaf_len(&only), "the table holds exactly one row per program byte");
     int flipped = 0;                               /* every row here is a cell of that leaf: flip one residue */
     for (size_t i = 0; i < only.nbuckets && !flipped; i++)
       for (MsRow *r = only.tab[i]; r; r = r->next)
         if (r->n >= 9) { r->b[1] ^= 0x01; flipped = 1; break; }
     CHECK(flipped, "a cell row was found to corrupt");
     SlateDag *lb = slate_dag_new(); MS_INSTALL(lb, &only);
-    SlateFrag *f = slate_frag_load(lb, one.w, one.wn, one.pn);
+    SlateFrag *f = slate_frag_load(lb, one.w, one.wn);
     CHECK(f == NULL, "a store that hands back a different byte is refused");
     if (f) slate_frag_free(f);
     slate_dag_free(lb);
@@ -173,15 +171,48 @@ int main(void) {
     ms_free(&only);
   }
 
-  /* 4b. count-amplification hardening: a count of ~4 billion cells must refuse on the first cell the store
-   * does not hold, instead of resizing to billions of elements ahead of the crc check (OOM-DoS). */
+  /* 4b. a store that lost a cell: the walk stops at the first cell nobody has, so what reaches the parser is
+   * short. Nothing said how long the leaf was, so nothing catches this before the parser — and the parser must
+   * catch it at every stopping point. A walk that stopped early is never parsed into a fragment, so it is
+   * never spliced and never run. Its own table again, so every row in it is a cell of this one leaf. */
   {
-    CHECK(load_by(frag.w, frag.wn, 0xFFFFFFFFULL, NULL) == NULL, "huge count refused (no OOM)");
+    MemStore lost; ms_init(&lost, 1 << 12);
+    SlateDag *kb = slate_dag_new(); MS_INSTALL(kb, &lost);
+    int64_t ph[4] = {0, 0, 0, 0}, bc[4] = {10, 20, 30, 40};
+    uint32_t ca = slate_dag_carrier(kb, ph, 4), cc = slate_dag_carrier(kb, bc, 4);
+    int32_t pp = slate_dag_param(kb, 0);
+    int32_t rt = slate_dag_add(kb, slate_dag_mul(kb, slate_dag_load(kb, ca, pp), slate_dag_lit(kb, 2)),
+                               slate_dag_load(kb, cc, pp));
+    Prog one = {0};
+    uint32_t hs[1] = {ca};
+    CHECK(slate_dag_save_fragment(kb, rt, hs, 1, &one.w, &one.wn) == NULL, "leaf kept for the lost-cell walk");
+    slate_dag_free(kb);
+    const size_t len = ms_leaf_len(&lost);
+    CHECK(len > 0, "the lost-cell walk has a leaf to shorten");
+    int ran = 0;
+    for (size_t stop = 0; stop < len; stop++) {          /* the walk stops after `stop` cells */
+      ms_leaf_stop_after(&lost, stop);
+      SlateDag *sb = slate_dag_new(); MS_INSTALL(sb, &lost);
+      SlateFrag *sf = slate_frag_load(sb, one.w, one.wn);
+      if (sf) { ran++; slate_frag_free(sf); }
+      slate_dag_free(sb);
+    }
+    CHECK(ran == 0, "a walk that stopped early was never parsed into a fragment");
+    ms_leaf_stop_after(&lost, len);                      /* every cell back: the whole leaf loads again */
+    {
+      SlateDag *sb = slate_dag_new(); MS_INSTALL(sb, &lost);
+      SlateFrag *sf = slate_frag_load(sb, one.w, one.wn);
+      CHECK(sf != NULL, "the whole walk loads once every cell is there again");
+      if (sf) slate_frag_free(sf);
+      slate_dag_free(sb);
+    }
+    prog_free(&one);
+    ms_free(&lost);
   }
 
   /* 5. splice typecheck / arg errors: wrong arity and an out-of-range carrier id both refuse cleanly */
   {
-    SlateFrag *f = load_by(frag.w, frag.wn, frag.pn, NULL);
+    SlateFrag *f = load_by(frag.w, frag.wn, NULL);
     SlateDag *b = slate_dag_new();
     MS_INSTALL(b, &store);
     int64_t A[4] = {1, 2, 3, 4};
@@ -226,7 +257,7 @@ int main(void) {
     int32_t root = slate_dag_asr(b, l, slate_dag_lit(b, 1));    /* root[i] = A[i] >> 1 */
     Prog out = {0};
     uint32_t holes[1] = {cid};
-    CHECK(slate_dag_save_fragment(b, root, holes, 1, &out.w, &out.wn, &out.pn) == NULL, "asr fragment kept");
+    CHECK(slate_dag_save_fragment(b, root, holes, 1, &out.w, &out.wn) == NULL, "asr fragment kept");
     slate_dag_free(b);
 
     int64_t A[4] = {8, 9, 10, 100}, res[4] = {0};
@@ -306,10 +337,10 @@ int main(void) {
     int32_t root = slate_dag_add(b, p, slate_dag_lit(b, 0));    /* root reads param(1<<20) */
     Prog fr = {0};
     uint32_t none = 0;
-    CHECK(slate_dag_save_fragment(b, root, &none, 0, &fr.w, &fr.wn, &fr.pn) == NULL, "oob-param fragment kept");
+    CHECK(slate_dag_save_fragment(b, root, &none, 0, &fr.w, &fr.wn) == NULL, "oob-param fragment kept");
     slate_dag_free(b);
 
-    SlateFrag *f = load_by(fr.w, fr.wn, fr.pn, NULL);
+    SlateFrag *f = load_by(fr.w, fr.wn, NULL);
     CHECK(f != NULL, "oob-param fragment loads (crc-valid)");
     if (f) {
       SlateDag *b2 = slate_dag_new();

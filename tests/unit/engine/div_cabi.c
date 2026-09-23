@@ -53,17 +53,17 @@ int main(void) {
     }
     slate_dag_free(b);
   }
-  /* 2. a fragment holding the quotient: kept as a leaf, loaded by name, spliced — the same cells */
+  /* 2. a fragment holding the quotient: kept as a leaf, walked back by its word, spliced — the same cells */
   {
     SlateDag *b = slate_dag_new(); MS_INSTALL(b, &store);
     int32_t s = slate_dag_param(b, 0);
     int32_t root = slate_dag_div(b, slate_dag_add(b, s, slate_dag_lit(b, 3)), slate_dag_add(b, slate_dag_mul(b, s, s), slate_dag_lit(b, 1)));
-    uint8_t *w = NULL; uint64_t wn = 0, pn = 0;
-    CHECK(slate_dag_save_fragment(b, root, NULL, 0, &w, &wn, &pn) == NULL, "keep the quotient fragment as a leaf");
+    uint8_t *w = NULL; uint64_t wn = 0;
+    CHECK(slate_dag_save_fragment(b, root, NULL, 0, &w, &wn) == NULL, "keep the quotient fragment as a leaf");
     slate_dag_free(b);
     SlateDag *lb = slate_dag_new(); MS_INSTALL(lb, &store);
-    SlateFrag *f = slate_frag_load(lb, w, wn, pn);
-    CHECK(f != NULL, "load the quotient fragment by name (feature \"rational\")");
+    SlateFrag *f = slate_frag_load(lb, w, wn);
+    CHECK(f != NULL, "walk the quotient fragment back by its word (feature \"rational\")");
     if (f) {
       SlateDag *b2 = slate_dag_new(); MS_INSTALL(b2, &store);
       int32_t r2 = -1;
