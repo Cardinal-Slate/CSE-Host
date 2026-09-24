@@ -844,7 +844,12 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
  * carrying machines and the taker walks it back through the same door it reads any other row through. There is
  * no count beside the word: the taker walks the cells to the first one nobody has, and the records are the
  * count. `wn` 0 is no program. Which share the taker carries is the taker's own primes, handed to
- * slate_dag_take_ask beside the ask. ---- */
+ * slate_dag_take_ask beside the ask.
+ *
+ * The ask itself travels the same way: these bytes are kept as a leaf on the roster lens, exactly as the
+ * construction is (leaf_put, one cell per byte under the word of the lens in the clear ‖ the bytes), and what
+ * is handed back is the ask's word. The bytes never cross a door — an Interest for an ask's word is the one
+ * packet that says "run this". ---- */
 static void ask_put_u32(std::vector<uint8_t> &b, uint32_t v) {
   for (int i = 0; i < 4; i++) b.push_back((uint8_t)(v >> (8 * i)));
 }
@@ -862,8 +867,8 @@ struct AskRd {
   bool i64v(int64_t &v) { uint64_t u = 0; if (!u64v(u)) return false; v = (int64_t)u; return true; }
 };
 
-extern "C" int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n) try {
-  if (!b || !out || !n) return 1;
+extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try {
+  if (!b || !word || !wn_out) return 1;
   const Slate::Envelope &e = b->arena.env();
   const std::vector<int64_t> &roster = e.channels.roster;
   /* the program's word, as it stands: nothing rides beside it */
@@ -877,17 +882,31 @@ extern "C" int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n) try 
   for (int64_t d : b->dims_buf) ask_put_u64(a, (uint64_t)d);
   ask_put_u64(a, (uint64_t)wn);
   a.insert(a.end(), w, w + wn);
-  uint8_t *o = (uint8_t *)std::malloc(a.size());
+  /* the ask goes through the door like every other bytes handed in: one cell per byte, under the word of the
+     lens in the clear ‖ the bytes, on the roster lens when this container carries a share of one. The word is
+     all that leaves — an Interest for it is "run this ask". A store that kept nothing refuses. */
+  const Slate::Word key = b->arena.leaf_key(a.data(), a.size());
+  if (key.empty() || !Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, a.data(), a.size()))
+    return 1;
+  uint8_t *o = (uint8_t *)std::malloc(key.size());
   if (!o) return 1;
-  std::memcpy(o, a.data(), a.size());
-  *out = o; *n = (uint64_t)a.size();
+  std::memcpy(o, key.data(), key.size());
+  *word = o; *wn_out = (uint64_t)key.size();
   return 0;
 } catch (...) { return 1; }
 
-extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint64_t n,
+extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn,
                                           const int64_t *primes, uint32_t k) try {
-  if (!b || !ask || !n || (k && !primes)) return "args";
-  AskRd r{ ask, n, 0 };
+  if (!b || !word || !wn || (k && !primes)) return "args";
+  /* the ask is a leaf: walk its cells out of this container's store — word ‖ 0, word ‖ 1, … to the first cell
+     nobody has, the records are the count. Nothing under the word is not an ask; a leaf the door could only
+     half gather is not one yet, and says so rather than taking a short ask. */
+  std::vector<uint8_t> ask;
+  bool partial = false;
+  if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, Slate::Word(word, word + wn), ask, partial))
+    return partial ? "partial" : "args";
+  const uint64_t n = (uint64_t)ask.size();
+  AskRd r{ ask.data(), n, 0 };
   uint32_t shares = 0, rk = 0, ndims = 0;
   if (!r.u32v(shares) || !r.u32v(rk)) return "args";
   std::vector<int64_t> roster(rk);
@@ -895,10 +914,10 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint6
   if (!r.u32v(ndims)) return "args";
   std::vector<int64_t> dims(ndims);
   for (uint32_t i = 0; i < ndims; i++) { if (!r.i64v(dims[i]) || dims[i] < 0) return "args"; }
-  uint64_t wn = 0;
-  if (!r.u64v(wn) || r.cur + wn > r.n) return "args";
-  const uint8_t *word = ask + r.cur;
-  r.cur += wn;
+  uint64_t pwn = 0;
+  if (!r.u64v(pwn) || r.cur + pwn > r.n) return "args";
+  const uint8_t *prog = ask.data() + r.cur;
+  r.cur += pwn;
   /* the roster and the split first, then this machine's own share of it, then what to run and over what. The
      lens goes first so an ask always lands on a fresh statement — a container's old primes are not a reason
      to refuse the roster its ask names. */
@@ -908,14 +927,65 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint6
   /* the construction does not travel: the ask names it by its word, and this container walks the leaf out of
      its own store through the same door as any other row — with a roster, the share it carries, gathered whole
      by the door. */
-  if (const char *rc = slate_dag_program(b, wn ? word : nullptr, wn)) return rc;
+  if (const char *rc = slate_dag_program(b, pwn ? prog : nullptr, pwn)) return rc;
   b->dims_buf = std::move(dims);
   return nullptr;
+} catch (...) { return "internal"; }
+
+/* ---- run an ask by its word: take it, start it, and say what the root is ----
+ *
+ * This is the unit's whole answer to an Interest for an ask's word: an Interest for a word that names an ask
+ * is "run it". Take the ask (the leaf walked out of this container's store), start the program it names over
+ * the dims it carries, and hand back the reading's own word — the key the root's per-cell rows are kept under,
+ * so whoever asked can walk them.
+ *
+ * Whether the root is whole is read off the store, never remembered: cell 0's row through the container's own
+ * codec — the door in front of the store. The row (0) means every share of that cell has landed and the root is
+ * whole; not-whole (2) means this unit's share is there and another carrier's is not — the stopped state, which
+ * is "share", not a failure; nothing anywhere (1) is "share" too when this unit carries one share of a roster
+ * (its own share landed through the same door the gather now reports nothing for), and otherwise a store that
+ * kept nothing: the refusal. */
+extern "C" const char *slate_dag_run_ask(SlateDag *b, const uint8_t *word, uint64_t wn,
+                                         const int64_t *primes, uint32_t k,
+                                         uint8_t **root, uint64_t *rn) try {
+  if (!b || !word || !wn || (k && !primes) || !root || !rn) return "args";
+  *root = nullptr; *rn = 0;
+  if (const char *rc = slate_dag_take_ask(b, word, wn, primes, k)) return rc;
+  SlateArray *a = slate_dag_start(b, nullptr, 0);
+  if (!a) return "refused";                      /* no program, no leaf, or a tick refused: no wrong reading */
+  uint8_t *rw = nullptr; uint64_t rwn = 0;
+  if (const char *rc = slate_array_word(a, &rw, &rwn)) { slate_array_free(a); return rc; }
+  uint8_t *cw = nullptr; uint64_t cwn = 0;
+  if (const char *rc = slate_array_cell_word(a, 0, &cw, &cwn)) { std::free(rw); slate_array_free(a); return rc; }
+  std::vector<uint8_t> row;
+  const int rc0 = Slate::store_get_rc(a->codec, cw, (size_t)cwn, row);
+  std::free(cw);
+  const Slate::Envelope &e = b->arena.env();
+  const bool carries_share = !e.channels.roster.empty() && e.channels.shares >= 2 && !e.channels.primes.empty();
+  slate_array_free(a);
+  if (rc0 != 0 && rc0 != 2 && !(rc0 == 1 && carries_share)) { std::free(rw); return "refused"; }
+  *root = rw; *rn = rwn;                         /* on a reading, the root's word — whole or stopped */
+  return rc0 == 0 ? nullptr : "share";
 } catch (...) { return "internal"; }
 
 extern "C" uint64_t slate_array_size(const SlateArray *a) {
   return a ? (uint64_t)a->ar.size() : 0;
 }
+
+/* The reading's own word: the key its per-cell rows are kept under (cells_put spells each cell
+ * word_cat(key, word_i64(i))). This is the name a run hands back so another machine can walk the root cell by
+ * cell — the whole reading under one word, not one cell of it. */
+extern "C" const char *slate_array_word(const SlateArray *a, uint8_t **out, uint64_t *n) try {
+  if (!a || !out || !n) return "args";
+  const Slate::WBuffer &w = a->ar.word();
+  const size_t wn = Slate::plane_bytes(w);
+  if (!wn) return "args";                       /* a refused dispatch carries no word */
+  uint8_t *o = (uint8_t *)std::malloc(wn);
+  if (!o) return "internal";
+  std::memcpy(o, (const uint8_t *)w.raw_plane(), wn);
+  *out = o; *n = (uint64_t)wn;
+  return nullptr;
+} catch (...) { return "internal"; }
 
 /* The word of one cell of a reading: the reading's own word with the cell's index after it — the same name the
  * engine keeps that cell's row under (cells_put spells it word_cat(key, word_i64(i))), through the same codec

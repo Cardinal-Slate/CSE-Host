@@ -2,6 +2,41 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.10.0
+
+- **The ask is a leaf, run by its word.** Two packets and no third: the cells under a word, and a row under a
+  word. The ask's bytes were the last thing that travelled beside them, and they no longer do — they go
+  through the door like every other bytes handed in, one cell per byte on the roster lens
+  (`Arena::leaf_key` ‖ `Slate::leaf_put`, exactly the keep the construction gets), and what comes back is the
+  ask's word. Nothing is kept under the bare word: a leaf lives in its cells.
+- **Breaking, the two ask doors take and give a word:**
+  - `int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn)` — was `(const SlateDag *, uint8_t **out, uint64_t *n)`
+    handing back the bytes. It keeps the ask and hands back its word; nonzero when the store kept nothing.
+    (The container is no longer `const`: keeping is what the call does.)
+  - `const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn, const int64_t *primes, uint32_t k)`
+    — was `(SlateDag *, const uint8_t *ask, uint64_t n, ...)`. It walks the ask's leaf out of this container's
+    store (`word ‖ 0`, `word ‖ 1`, … to the first cell nobody has — the records are the count), then configures
+    the container as before. A word nothing is kept under is `"args"`; a leaf the door could only half gather
+    is `"partial"` — not whole is never the end of a leaf, and never a short ask.
+  - The ask's byte format is unchanged: `[shares u32][k u32][roster prime i64]*k [ndims u32][dim i64]*ndims [wn u64][program word u8]*wn`,
+    no tag and no version. What changed is that a reader gets those bytes from the store, never from a caller.
+- **New, `slate_dag_run_ask`**: a unit's whole answer to an Interest for an ask's word — an Interest for such a
+  word is "run it".
+  `const char *slate_dag_run_ask(SlateDag *b, const uint8_t *word, uint64_t wn, const int64_t *primes, uint32_t k, uint8_t **root, uint64_t *rn)`:
+  take the ask, start the program it names over the dims it carries, and hand back the root reading's own word.
+  NULL when the root is whole, `"share"` when this unit's share landed and the root is not whole (the stopped
+  state), `"args"` / `"partial"` / `"refused"` otherwise. Whole is read off the store and never remembered:
+  cell 0's row through the door in front of this container's store — the row is there (every share of that cell
+  landed) and the root is whole; not-whole says another carrier has not landed its share.
+- **New, `slate_array_word`**: `const char *slate_array_word(const SlateArray *a, uint8_t **out, uint64_t *n)`
+  — the reading's own word, the key its per-cell rows are kept under, so a reader walks the root cell by cell.
+  `slate_array_cell_word` is unchanged and stays: it is that key with a cell's index after it.
+- `tests/unit/abi_embed.c` block 9 states it: the ask is one byte cell per byte with nothing under the bare
+  word, its fields read back off those cells, the same context names the same ask and is never kept twice, a
+  word nothing is kept under is `"args"`, a half-gathered leaf is `"partial"`, a store that lies about the
+  ask's own cells is refused where it is read, and `slate_dag_run_ask` by that word hands back the root's word
+  — the same word twice over one store.
+
 ## 0.9.0
 
 - **There is no count anywhere.** Not beside a word, not in a name, not in the ask, not as a row. A leaf is

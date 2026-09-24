@@ -60,7 +60,8 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
  *          hi_j = (j+1)*k/n, k = the roster's size and n = min(shares, k) (shares 0 or 1: one unit, the whole
  *          roster). That is the one split rule; the placement door in front of the engine runs the same
  *          arithmetic, so both name the same share.
- * ask      the bytes that let any machine run the same construction on its own share (slate_dag_ask).
+ * ask      the bytes that let any machine run the same construction on its own share — itself a leaf, kept
+ *          through the door and named by its word (slate_dag_ask); an Interest for that word is "run it".
  * leaf     bytes handed in, or a construction written out: one cell per byte under its own word, on the whole
  *          lens that word carries, the same shape as every other row. A program is a leaf — never a file,
  *          never bytes inside an ask.
@@ -110,13 +111,18 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k, uin
 ///         one share of the roster it carries.
 const char *slate_dag_shares(SlateDag *b, uint32_t shares);
 
-/* ---- the ask: a container's run context, as bytes ----
+/* ---- the ask: a container's run context, kept as a leaf and named by its word ----
  *
  * The ask is what one machine hands another so it runs the same construction on its own share: the program's
  * word, the dims the last dispatch ran over, the roster and the shares. The construction itself does not
  * travel — a program is a leaf like any bytes handed in, so with a roster it is already sliced across the
  * carrying machines and the taker walks it back through the same door it reads any other row through. Which
  * share the taker carries is the taker's own primes, handed to slate_dag_take_ask beside the ask.
+ *
+ * The ask travels the same way as everything else: its bytes are kept as a leaf — one cell per byte, on the
+ * roster lens, under the word of (the lens in the clear ‖ the bytes) — and what the door hands back is that
+ * word. The bytes never cross a door. So there are two packets and no third: the cells under a word, and a
+ * row under a word. An Interest for an ask's word is the one thing that says "run this" (slate_dag_run_ask).
  *
  * The format is Host's, little-endian, fixed order, byte exact. Nothing rides in front of it — no tag byte,
  * no version byte:
@@ -129,19 +135,47 @@ const char *slate_dag_shares(SlateDag *b, uint32_t shares);
  * the leaf's cells to the first one nobody has, and the records are the count. A reader bounds-checks every
  * field against the ask's end and refuses a short or malformed ask rather than guessing at the bytes. */
 
-/// The container's run context as an ask. Writes a malloc'd buffer to *out/*n — the caller frees it with
+/// Keep this container's run context as an ask and hand back the ask's word. The bytes go through the door as
+/// a leaf (one cell per byte, on the roster lens when this container carries a share of one — nothing is ever
+/// kept under the bare word itself); *word/*wn is a malloc'd copy of the word, which the caller frees with
 /// free(). The dims are the last dispatch's (slate_dag_run or slate_dag_start); a container that has not run
-/// carries none, and the ask says ndims 0. A container that names no program asks with wn 0.
-/// @return 0; nonzero on a null argument or a buffer that could not be allocated.
-int slate_dag_ask(const SlateDag *b, uint8_t **out, uint64_t *n);
+/// carries none, and the ask says ndims 0. A container that names no program asks with wn 0. Two containers
+/// with the same context name the same ask — the word says what to run, never who asked.
+/// @return 0; nonzero on a null argument, a store that kept nothing, or a buffer that could not be allocated.
+int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn);
 
-/// Configure this container from an ask, with `primes` as its lens — the share this machine carries. Sets the
-/// roster and shares the ask names, then the lens (which must be one share of that roster), then the program's
-/// word and the dims. Nothing is kept here: the ask carries no bytes, and the program is walked out of this
-/// container's own store when it is started. A container configured this way starts with slate_dag_start.
-/// @return NULL; "args" on a null builder, a null/short ask, bytes that run past the ask's end, a roster the
-///         pool's rule refuses, or `primes` that are not one share of the ask's roster.
-const char *slate_dag_take_ask(SlateDag *b, const uint8_t *ask, uint64_t n, const int64_t *primes, uint32_t k);
+/// Configure this container from the ask that `word` names, with `primes` as its lens — the share this machine
+/// carries. The ask's leaf is walked out of this container's store (word ‖ 0, word ‖ 1, … to the first cell
+/// nobody has; the records are the count), then the roster and shares it names are set, then the lens (which
+/// must be one share of that roster), then the program's word and the dims. Nothing is kept here: the ask
+/// names the construction and carries none of it, and the program's own leaf is walked when it is started. A
+/// container configured this way starts with slate_dag_start.
+/// @return NULL; "partial" when the door could gather only part of the ask's leaf — a cell on some carriers
+///         and not all, which is not an ask yet, never a short one; "args" on a null builder, a null word, a
+///         word nothing is kept under, bytes that run past the ask's end, a roster the pool's rule refuses,
+///         or `primes` that are not one share of the ask's roster.
+const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn, const int64_t *primes, uint32_t k);
+
+/// Run the ask that `word` names on the share `primes`: take it, start the program it names over the dims it
+/// carries, and hand back the root reading's own word (*root/*rn, malloc'd; free() it) — the key the root's
+/// per-cell rows are kept under, so whoever asked walks them cell by cell. This is the whole of a unit's
+/// answer to an Interest for an ask's word: an Interest for such a word is "run it".
+///
+/// Whether the root is whole is read off the store, never remembered: cell 0's row through the door in front
+/// of this container's store. The row is there — every share of that cell landed — and the root is whole.
+/// @return NULL and the root's word: whole. "share" and the root's word: this unit's share landed and the root
+///         is not whole (the stopped state — another carrier has not landed its share; whoever lands the last
+///         one wakes the rest). "args" on a null argument or a word that names no ask; "partial" on an ask the
+///         door could only half gather; "refused" when the program does not start, or nothing anywhere is kept
+///         under the root's cell.
+const char *slate_dag_run_ask(SlateDag *b, const uint8_t *word, uint64_t wn, const int64_t *primes, uint32_t k,
+                              uint8_t **root, uint64_t *rn);
+
+/// The reading's own word: the key its per-cell rows are kept under. Hand it to the door to walk the reading
+/// cell by cell (word ‖ 0, word ‖ 1, …), which is what a run hands back (slate_dag_run_ask). Writes a malloc'd
+/// buffer to *out/*n; the caller frees it with free().
+/// @return NULL; "args" on a null argument or a reading that carries no word (a refused dispatch).
+const char *slate_array_word(const SlateArray *a, uint8_t **out, uint64_t *n);
 
 /// The word of cell `i` of a reading: the reading's own word with the cell's index after it, the same name the
 /// engine's per-cell rows are kept under. A deployment hands this to the door in front of the store to ask

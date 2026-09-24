@@ -30,14 +30,38 @@ static int host_perform(const char *cls, const uint8_t *req, uint64_t reqn, uint
   uint8_t *b = (uint8_t *)malloc(8); uint64_t v = (uint64_t)h->reply; for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8 * i));
   *out = b; *outn = 8; return 0;
 }
-/* ---- the store: rows behind decode/put ---- */
+/* ---- the store: rows behind decode/put. `partial` makes every get answer 2 — not whole: a door in front of
+ * a store that gathered some carriers' shares of a word but not all. A reader must never read that as the end
+ * of a leaf. ---- */
 typedef struct { uint8_t *w; uint64_t wn; uint8_t *b; uint64_t n; } Row;
-typedef struct { Row *r; size_t n, cap; long hits, puts; } Store;
+typedef struct { Row *r; size_t n, cap; long hits, puts; int partial; const uint8_t *pw; uint64_t pwn; } Store;
 static int st_get(const uint8_t *w, uint64_t wn, const uint8_t *s, uint64_t sn, uint8_t **out, uint64_t *outn, void *u) {
   (void)s; (void)sn; Store *st = (Store *)u;
+  if (st->partial) return 2;
+  if (st->pw && wn == st->pwn && memcmp(w, st->pw, (size_t)wn) == 0) return 2;   /* this one word: not whole */
   for (size_t i = 0; i < st->n; i++) if (st->r[i].wn == wn && memcmp(st->r[i].w, w, (size_t)wn) == 0) {
     st->hits++; *out = (uint8_t *)malloc(st->r[i].n ? (size_t)st->r[i].n : 1); memcpy(*out, st->r[i].b, (size_t)st->r[i].n); *outn = st->r[i].n; return 0; }
   return 1;
+}
+/* A leaf's cell is an ordinary row — [sign u8][num residue u32]*m [den residue u32]*m (tests/memstore.h's
+ * cell model, the same one). A byte is laid at width 1, so a byte over 127 is kept as its signed form: the
+ * sign byte set and the magnitude 256 - v. Every prime of any lens is far larger than 256, so each residue of
+ * such a magnitude is just the magnitude — which is why a test reads a cell's byte off its row without
+ * knowing a single prime. -1 when the row is not a byte cell. */
+static int st_cell_byte(const Row *r) {
+  if (!r || r->n < 9 || (r->n - 1) % 8) return -1;
+  uint32_t mag = 0; memcpy(&mag, r->b + 1, 4);
+  if (r->b[0]) return (mag && mag <= 128) ? (int)(256u - mag) : -1;
+  return mag <= 127 ? (int)mag : -1;
+}
+/* and the other way: make a cell hold this byte — a store that hands a reader something else. */
+static void st_cell_set(Row *r, unsigned char v) {
+  if (!r || r->n < 9 || (r->n - 1) % 8) return;
+  const uint32_t m = (uint32_t)((r->n - 1) / 8);
+  const int neg = v >= 128;
+  const uint32_t mag = neg ? (uint32_t)(256 - (int)v) : (uint32_t)v, one = 1;
+  r->b[0] = (uint8_t)(neg ? 1 : 0);
+  for (uint32_t j = 0; j < m; j++) { memcpy(r->b + 1 + 4 * j, &mag, 4); memcpy(r->b + 1 + 4 * (m + j), &one, 4); }
 }
 static int st_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n, const uint8_t *s, uint64_t sn, void *u) {
   (void)s; (void)sn; Store *st = (Store *)u; st->puts++;
@@ -396,75 +420,153 @@ int main(void) {
     SlateArray *arr = slate_dag_run(b, root, dims, 1);
     CHECK(arr != NULL, "9: the run over a share produced no reading");
 
+    /* the ask is a leaf like any other bytes: it goes through the door one cell per byte, and what comes back
+       is its word. The bytes never cross a door. */
+    const size_t before = st.n;
     uint8_t *ask = NULL; uint64_t askn = 0;
-    CHECK(slate_dag_ask(b, &ask, &askn) == 0 && ask != NULL, "9: the ask was refused");
+    CHECK(slate_dag_ask(b, &ask, &askn) == 0 && ask != NULL && askn > 0, "9: the ask was refused");
     { uint8_t *nul = NULL; uint64_t nn = 0;
       CHECK(slate_dag_ask(NULL, &nul, &nn) != 0, "9: a null builder was asked");
       CHECK(slate_dag_ask(b, NULL, &nn) != 0, "9: a null out was accepted");
       CHECK(slate_dag_ask(b, &nul, NULL) != 0, "9: a null length was accepted"); }
-    /* the ask reads back exactly what the container carries, in its one fixed order and nothing in front of
-       it: shares, the roster, the dims, and the program's word — nothing beside the word, because the taker
-       walks the leaf's cells to the first one nobody has. The construction itself does not travel. */
-    if (askn >= 8) {
-      uint32_t shares_r = 0, k_r = 0;
-      for (int i = 0; i < 4; i++) shares_r |= (uint32_t)ask[i] << (8 * i);
-      for (int i = 0; i < 4; i++) k_r |= (uint32_t)ask[4 + i] << (8 * i);
-      CHECK(shares_r == 3 && k_r == 6, "9: the ask says shares %u k %u (want 3, 6)", shares_r, k_r);
-      uint64_t off = 8 + 8 * (uint64_t)k_r;
-      uint32_t nd = 0; for (int i = 0; i < 4; i++) nd |= (uint32_t)ask[off + i] << (8 * i);
-      CHECK(nd == 1, "9: the ask says %u dims (want 1)", nd);
-      uint64_t d0 = 0; for (int i = 0; i < 8; i++) d0 |= (uint64_t)ask[off + 4 + i] << (8 * i);
-      CHECK(d0 == 4, "9: the ask says dim %llu (want 4)", (unsigned long long)d0);
-      uint64_t wn = 0; for (int i = 0; i < 8; i++) wn |= (uint64_t)ask[off + 12 + i] << (8 * i);
-      CHECK(wn > 0, "9: the ask names no program — an API-built construction was not kept as a leaf");
-      CHECK(askn == off + 20 + wn, "9: the ask is %llu bytes, its own fields say %llu — something rides beside the word",
-            (unsigned long long)askn, (unsigned long long)(off + 20 + wn));
+    /* nothing is kept under the bare word: a leaf lives in its cells, word ‖ 0, word ‖ 1, … */
+    { uint8_t *o = NULL; uint64_t on = 0;
+      CHECK(st_get(ask, askn, NULL, 0, &o, &on, &st) != 0, "9: the ask's bytes were kept under the bare word");
+      free(o); }
+    /* one cell per byte, in put order — the ask reads back off the rows the put left behind, and says exactly
+       what the container carries, in its one fixed order with nothing in front of it: shares, the roster, the
+       dims, and the program's word. Nothing rides beside that word: the taker walks the program's own leaf to
+       the first cell nobody has. Neither construction travels. */
+    const size_t ncells = st.n - before;
+    unsigned char *bytes = (unsigned char *)malloc(ncells ? ncells : 1);
+    int cells_ok = ncells >= 28;
+    for (size_t i = 0; cells_ok && i < ncells; i++) {
+      int v = st_cell_byte(&st.r[before + i]);
+      if (v < 0) cells_ok = 0; else bytes[i] = (unsigned char)v;
     }
+    CHECK(cells_ok, "9: the ask's leaf is not one byte cell per byte (%zu rows)", ncells);
+    if (cells_ok) {
+      uint32_t shares_r = 0, k_r = 0;
+      for (int i = 0; i < 4; i++) shares_r |= (uint32_t)bytes[i] << (8 * i);
+      for (int i = 0; i < 4; i++) k_r |= (uint32_t)bytes[4 + i] << (8 * i);
+      CHECK(shares_r == 3 && k_r == 6, "9: the ask says shares %u k %u (want 3, 6)", shares_r, k_r);
+      size_t off = 8 + 8 * (size_t)k_r;
+      uint32_t nd = 0; for (int i = 0; i < 4; i++) nd |= (uint32_t)bytes[off + i] << (8 * i);
+      CHECK(nd == 1, "9: the ask says %u dims (want 1)", nd);
+      uint64_t d0 = 0; for (int i = 0; i < 8; i++) d0 |= (uint64_t)bytes[off + 4 + i] << (8 * i);
+      CHECK(d0 == 4, "9: the ask says dim %llu (want 4)", (unsigned long long)d0);
+      uint64_t pwn = 0; for (int i = 0; i < 8; i++) pwn |= (uint64_t)bytes[off + 12 + i] << (8 * i);
+      CHECK(pwn > 0, "9: the ask names no program — an API-built construction was not kept as a leaf");
+      CHECK(ncells == off + 20 + (size_t)pwn, "9: the ask is %zu bytes, its own fields say %zu — something rides beside the word",
+            ncells, off + 20 + (size_t)pwn);
+    }
+    free(bytes);
 
-    /* the cell word: the reading's word with the cell's index after it */
+    /* the reading's own word, and the word of one of its cells: the key the per-cell rows are kept under, and
+       that key with the cell's index after it */
     if (arr) {
-      uint8_t *cw0 = NULL, *cw1 = NULL; uint64_t cn0 = 0, cn1 = 0;
+      uint8_t *rw = NULL, *cw0 = NULL, *cw1 = NULL; uint64_t rn = 0, cn0 = 0, cn1 = 0;
+      CHECK(slate_array_word(arr, &rw, &rn) == NULL && rn > 0, "9: the reading has no word");
       CHECK(slate_array_cell_word(arr, 0, &cw0, &cn0) == NULL && cn0 > 0, "9: cell 0 has no word");
       CHECK(slate_array_cell_word(arr, 1, &cw1, &cn1) == NULL && cn1 > 0, "9: cell 1 has no word");
       CHECK(cn0 != cn1 || memcmp(cw0, cw1, (size_t)cn0) != 0, "9: two cells of one reading share a word");
+      CHECK(rn != cn0 || memcmp(rw, cw0, (size_t)rn) != 0, "9: the reading's word is cell 0's word");
+      CHECK(slate_array_word(NULL, &rw, &rn) != NULL, "9: a null reading was accepted");
+      CHECK(slate_array_word(arr, NULL, &rn) != NULL, "9: a null out was accepted");
       CHECK(slate_array_cell_word(NULL, 0, &cw0, &cn0) != NULL, "9: a null reading was accepted");
       CHECK(slate_array_cell_word(arr, 0, NULL, &cn0) != NULL, "9: a null out was accepted");
-      free(cw0); free(cw1);
+      free(rw); free(cw0); free(cw1);
     }
 
-    /* the round trip: a fresh container takes the ask on a different share of the same roster (the runner
-       carries share 1), and asks back the same bytes — the ask says what to run and over what lens, never who
-       asked. Which share a machine carries is its own primes, handed in beside the ask. */
+    /* the round trip: a fresh container takes the ask by its word on a different share of the same roster (the
+       runner carries share 0), and asks back the same word — the ask says what to run and over what lens,
+       never who asked, so the same context is the same leaf and the same name, and nothing is kept twice.
+       Which share a machine carries is its own primes, handed in beside the word. */
     SlateDag *u = slate_dag_new();
     slate_dag_codec(u, NULL, st_get, st_put, NULL, 0, &st);
     CHECK(slate_dag_take_ask(u, ask, askn, share0, 2) == NULL, "9: taking the ask on another share was refused");
+    const size_t rows_taken = st.n;
     uint8_t *ask2 = NULL; uint64_t ask2n = 0;
     CHECK(slate_dag_ask(u, &ask2, &ask2n) == 0, "9: the taker's ask was refused");
     CHECK(ask2n == askn && ask2 && memcmp(ask, ask2, (size_t)askn) == 0,
           "9: the ask carries who asked — it did not round trip across shares (%llu vs %llu bytes)",
           (unsigned long long)ask2n, (unsigned long long)askn);
+    CHECK(st.n == rows_taken, "9: the same ask was kept twice (%zu rows became %zu)", rows_taken, st.n);
     /* the taker runs the ask's program on its own share, over the dims the ask carried — no dims named here */
     SlateArray *ua = slate_dag_start(u, NULL, 0);
     CHECK(ua != NULL, "9: the taker could not start the ask's program over the ask's dims");
     slate_array_free(ua);
-    /* an ask whose share is not one of the roster's is refused, and so is a tag this build does not know */
+    /* run_ask: one call is a unit's whole answer to an Interest for an ask's word — take it, start it, hand
+       back the ROOT's word. Over this store every row is local, so the root is whole and the refusal is NULL. */
+    { SlateDag *r = slate_dag_new(); slate_dag_codec(r, NULL, st_get, st_put, NULL, 0, &st);
+      uint8_t *root = NULL; uint64_t rn = 0;
+      const char *rc = slate_dag_run_ask(r, ask, askn, share1, 2, &root, &rn);
+      CHECK(rc == NULL, "9: running the ask by its word said \"%s\" (want whole)", rc ? rc : "");
+      CHECK(root != NULL && rn > 0, "9: a run of the ask handed back no root word");
+      /* the root's word is a name, not a reading: a second run over the same store names the same root */
+      SlateDag *r2 = slate_dag_new(); slate_dag_codec(r2, NULL, st_get, st_put, NULL, 0, &st);
+      uint8_t *root2 = NULL; uint64_t rn2 = 0;
+      CHECK(slate_dag_run_ask(r2, ask, askn, share1, 2, &root2, &rn2) == NULL, "9: the second run of the ask refused");
+      CHECK(root2 && rn2 == rn && memcmp(root, root2, (size_t)rn) == 0, "9: two runs of one ask named two roots");
+      free(root); free(root2); slate_dag_free(r); slate_dag_free(r2); }
+    /* the stopped state: a door that answers "not whole" for the root's first cell — this unit's share is
+       there, another carrier's is not — leaves the unit at its share and says so, with the root's word all
+       the same, so whoever lands the last share can still wake it by that name. */
+    if (arr) {
+      uint8_t *cw = NULL; uint64_t cn = 0;
+      if (slate_array_cell_word(arr, 0, &cw, &cn) == NULL) {
+        SlateDag *s = slate_dag_new(); slate_dag_codec(s, NULL, st_get, st_put, NULL, 0, &st);
+        uint8_t *root = NULL; uint64_t rn = 0;
+        st.pw = cw; st.pwn = cn;
+        const char *rc = slate_dag_run_ask(s, ask, askn, share1, 2, &root, &rn);
+        st.pw = NULL; st.pwn = 0;
+        CHECK(slate_refused(rc, "share"), "9: a root whose first cell is not whole said \"%s\"", rc ? rc : "whole");
+        CHECK(root != NULL && rn > 0, "9: the stopped state handed back no root word");
+        free(root); slate_dag_free(s);
+      }
+      free(cw);
+    }
+    /* a word that names no ask, and the null arguments */
+    { SlateDag *r = slate_dag_new(); slate_dag_codec(r, NULL, st_get, st_put, NULL, 0, &st);
+      uint8_t *root = NULL; uint64_t rn = 0;
+      uint8_t *junk = (uint8_t *)malloc((size_t)askn); memcpy(junk, ask, (size_t)askn);
+      for (uint64_t i = 0; i < askn; i++) junk[i] = (uint8_t)(ask[i] ^ 0x5A);
+      CHECK(slate_refused(slate_dag_run_ask(r, junk, askn, share1, 2, &root, &rn), "args"), "9: a word naming no ask ran");
+      CHECK(slate_dag_run_ask(NULL, ask, askn, share1, 2, &root, &rn) != NULL, "9: a null builder ran an ask");
+      CHECK(slate_dag_run_ask(r, ask, askn, share1, 2, NULL, &rn) != NULL, "9: a null root was accepted");
+      free(junk); slate_dag_free(r); }
+    /* an ask whose share is not one of the roster's, a word nothing is kept under, a leaf the door could only
+       half gather (not whole: never the end of a leaf), and the malformed asks */
     { SlateDag *x = slate_dag_new(); slate_dag_codec(x, NULL, st_get, st_put, NULL, 0, &st);
       CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, astride, 2), "args"), "9: an ask taken astride the split");
       CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, NULL, 0), "args"), "9: an ask taken with no share");
-      uint8_t *bad = (uint8_t *)malloc((size_t)askn); memcpy(bad, ask, (size_t)askn);
-      bad[4] = 0xFF; bad[5] = 0xFF; bad[6] = 0xFF; bad[7] = 0x0F;   /* a roster longer than the ask */
-      CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: a roster past the ask's end was taken");
-      memcpy(bad, ask, (size_t)askn);
-      { uint64_t off = 8 + 8 * 6, huge = 0xFFFFFFFFull; memcpy(bad + off + 12, &huge, 8); }   /* a word past the ask's end */
-      CHECK(slate_refused(slate_dag_take_ask(x, bad, askn, share1, 2), "args"), "9: a word past the ask's end was taken");
-      CHECK(slate_refused(slate_dag_take_ask(x, ask, 4, share1, 2), "args"), "9: a truncated ask was taken");
-      CHECK(slate_dag_take_ask(x, NULL, 0, share1, 2) != NULL, "9: a null ask was taken");
-      free(bad); slate_dag_free(x); }
+      uint8_t *junk = (uint8_t *)malloc((size_t)askn); memcpy(junk, ask, (size_t)askn);
+      for (uint64_t i = 0; i < askn; i++) junk[i] = (uint8_t)(ask[i] ^ 0xA5);
+      CHECK(slate_refused(slate_dag_take_ask(x, junk, askn, share1, 2), "args"), "9: a word nothing is kept under was taken");
+      CHECK(slate_dag_take_ask(x, NULL, 0, share1, 2) != NULL, "9: a null word was taken");
+      st.partial = 1;
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, share1, 2), "partial"), "9: a half-gathered ask was taken whole");
+      st.partial = 0;
+      free(junk); slate_dag_free(x); }
+    /* a malformed ask, now that no bytes travel: the only thing that can lie is the store. Set the leaf's own
+       cells to a roster longer than the leaf, and the reader — which bounds-checks every field against the
+       end it walked to — refuses where it reads rather than guessing at the bytes. Then put them back. */
+    if (cells_ok && ncells) {
+      SlateDag *x = slate_dag_new(); slate_dag_codec(x, NULL, st_get, st_put, NULL, 0, &st);
+      unsigned char keep[4];
+      for (int i = 0; i < 4; i++) { keep[i] = (unsigned char)st_cell_byte(&st.r[before + 4 + (size_t)i]); }
+      const unsigned char huge[4] = { 0xFF, 0xFF, 0xFF, 0x0F };
+      for (int i = 0; i < 4; i++) st_cell_set(&st.r[before + 4 + (size_t)i], huge[i]);
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, share1, 2), "args"), "9: a roster past the ask's end was taken");
+      for (int i = 0; i < 4; i++) st_cell_set(&st.r[before + 4 + (size_t)i], keep[i]);
+      CHECK(slate_dag_take_ask(x, ask, askn, share1, 2) == NULL, "9: the ask put back was refused");
+      slate_dag_free(x);
+    }
 
     free(ask); free(ask2);
     slate_array_free(arr);
     slate_dag_free(u); slate_dag_free(b); st_free(&st);
-    printf("  roster: the whole lens and its split; a lens must be one share of it; the ask names the program and carries none of it, round trips, and the taker starts it on its own share; a cell has a word\n");
+    printf("  roster: the whole lens and its split; a lens must be one share of it; the ask is a leaf named by its word, round trips, and running it by that word hands back the root's word\n");
   }
 
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
