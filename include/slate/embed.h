@@ -61,7 +61,7 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
  *          every unit, read at start and asked of the placement seam — never a setting on a container and
  *          never in a word. Re-dividing a roster therefore renames nothing.
  * ask      the bytes that let any machine run the same construction on its own share — itself a leaf, kept
- *          through the door and named by its word (slate_dag_ask); an Interest for that word is "run it".
+ *          through the door and named by its word (slate_dag_ask); a read for that word is "run it".
  * leaf     bytes handed in, or a construction written out: one cell per byte under its own word, on the whole
  *          lens that word carries, the same shape as every other row. A program is a leaf — never a file,
  *          never bytes inside an ask.
@@ -119,7 +119,7 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
  * The ask travels the same way as everything else: its bytes are kept as a leaf — one cell per byte, on the
  * roster lens, under the word of (the lens in the clear ‖ the bytes) — and what the door hands back is that
  * word. The bytes never cross a door. So there are two packets and no third: the cells under a word, and a
- * row under a word. An Interest for an ask's word is the one thing that says "run this" (slate_dag_run_ask).
+ * row under a word. A read for an ask's word is the one thing that says "run this" (slate_dag_run_ask).
  *
  * The format is Host's, little-endian, fixed order, byte exact. Nothing rides in front of it — no tag byte,
  * no version byte:
@@ -159,7 +159,7 @@ const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn, co
 /// Run the ask that `word` names on the share `primes`: take it, start the program it names over the dims it
 /// carries, and hand back the root reading's own word (*root/*rn, malloc'd; free() it) — the key the root's
 /// per-cell rows are kept under, so whoever asked walks them cell by cell. This is the whole of a unit's
-/// answer to an Interest for an ask's word: an Interest for such a word is "run it".
+/// answer to a read for an ask's word: a read for such a word is "run it".
 ///
 /// Whether the root is whole is read off the store, never remembered: cell 0's row through the door in front
 /// of this container's store. The row is there — every share of that cell landed — and the root is whole.
