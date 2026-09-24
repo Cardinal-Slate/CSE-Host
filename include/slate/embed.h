@@ -55,11 +55,11 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
  *
  * roster   the whole lens of a word: every data prime, in order. The guard prime is the engine's, never in a
  *          roster. A word built by a region that carries a roster names the roster, not this container's primes.
- * shares   how many units the roster is divided into (the split rule).
- * share    the primes one machine carries: unit j takes roster[lo_j, hi_j) with lo_j = j*k/n,
- *          hi_j = (j+1)*k/n, k = the roster's size and n = min(shares, k) (shares 0 or 1: one unit, the whole
- *          roster). That is the one split rule; the placement door in front of the engine runs the same
- *          arithmetic, so both name the same share.
+ * share    the primes one machine carries: a contiguous run of the roster, roster[lo, hi). That is all the
+ *          engine knows about a share, and all it needs to: every way of dividing a roster hands each unit one
+ *          such run. How many units there are and which run is whose is the deployment's rule — the same on
+ *          every unit, read at start and asked of the placement seam — never a setting on a container and
+ *          never in a word. Re-dividing a roster therefore renames nothing.
  * ask      the bytes that let any machine run the same construction on its own share — itself a leaf, kept
  *          through the door and named by its word (slate_dag_ask); an Interest for that word is "run it".
  * leaf     bytes handed in, or a construction written out: one cell per byte under its own word, on the whole
@@ -74,9 +74,11 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
 /// the source of a half-answer.
 ///
 /// With no roster set (slate_dag_roster), `primes` is the whole lens of this container's words. With a roster
-/// set, `primes` must be exactly one share of it — roster[lo_j, hi_j) for some unit j under the roster's split
-/// rule — else the call refuses: a container never carries channels that are not a share of the lens its words
-/// name. (So does `k` 0 with a roster set: a container carrying a roster carries one of its shares.)
+/// set, `primes` must be one share of it — a contiguous sub-range roster[lo, hi), which is what any division
+/// of the roster hands a unit — else the call refuses: a container never carries channels that are not a share
+/// of the lens its words name. A set of the roster's primes that is not a run of them (astride, out of order,
+/// with a gap) is not a share, and neither is `k` 0 with a roster set: a container carrying a roster carries
+/// one of its shares. The whole roster is a share — that is the undivided deployment.
 ///
 /// The lens is part of a reading's name, so the same value read through two lenses is two rows. That is what
 /// lets several hosts each hold a share of one number without speaking to each other: each names its own share
@@ -92,29 +94,24 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
 ///         is not one share of a roster this container carries.
 const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32_t k);
 
-/// The whole lens this container's words name, and its division: `primes` is the roster (every data prime, in
-/// order) and `shares` the number of units it divides into under the split rule above. A container with a
-/// roster computes one share of it (slate_dag_lens) and keeps share rows under the roster's words, so another
-/// machine carrying another share of the same roster names the same words for the same construction.
+/// The whole lens this container's words name: `primes` is the roster (every data prime, in order). A
+/// container with a roster computes one share of it (slate_dag_lens) and keeps share rows under the roster's
+/// words, so another machine carrying another share of the same roster names the same words for the same
+/// construction. The roster is the whole of what a word carries about the lens — how many units it is divided
+/// into is the deployment's rule, not this container's and not a word's, which is why there is no `shares`
+/// here and no way to set one. A run never spreads in process: this container computes its own share and
+/// nothing else, and what carries the others is the placement seam's question, never the engine's.
 ///
 /// Same prime rule as slate_dag_lens: each at least 2, below 2^24, actually prime, not the pool's guard, no
 /// repeats. `k` 0 (or a null list) clears the roster — this container's `primes` are then the whole lens again.
 /// @return NULL; "args" on a null builder, a null list with k > 0, a prime the pool's rule refuses, or a
-///         roster/`shares` under which this container's already-pinned `primes` are not one share.
-const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k, uint32_t shares);
-
-/// How many units the roster divides into — the split rule's `shares`, set on its own. Kept for compatibility
-/// with the containers that set it beside slate_dag_lens; slate_dag_roster sets both at once. A run never
-/// spreads in process: this container computes its own share and nothing else, and what carries the other
-/// shares is the placement door's question, never the engine's.
-/// @return NULL; "args" on a null builder, or a `shares` under which this container's `primes` are no longer
-///         one share of the roster it carries.
-const char *slate_dag_shares(SlateDag *b, uint32_t shares);
+///         roster this container's already-pinned `primes` are not a contiguous sub-range of.
+const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
 
 /* ---- the ask: a container's run context, kept as a leaf and named by its word ----
  *
  * The ask is what one machine hands another so it runs the same construction on its own share: the program's
- * word, the dims the last dispatch ran over, the roster and the shares. The construction itself does not
+ * word, the dims the last dispatch ran over, and the roster. The construction itself does not
  * travel — a program is a leaf like any bytes handed in, so with a roster it is already sliced across the
  * carrying machines and the taker walks it back through the same door it reads any other row through. Which
  * share the taker carries is the taker's own primes, handed to slate_dag_take_ask beside the ask.
@@ -127,8 +124,11 @@ const char *slate_dag_shares(SlateDag *b, uint32_t shares);
  * The format is Host's, little-endian, fixed order, byte exact. Nothing rides in front of it — no tag byte,
  * no version byte:
  *
- *     [shares u32][k u32][roster prime i64] * k
+ *     [k u32][roster prime i64] * k
  *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn
+ *
+ * The division is not in it, and never was in a word: how many units a roster is cut into is the deployment's
+ * rule, the same on every unit, so re-dividing one renames nothing it ever named.
  *
  * `k` 0 = no roster (this container's own lens is the whole one). `wn` 0 = no program: the container names no
  * construction, and a taker of that ask has nothing to start. Nothing rides beside the word — the taker walks
@@ -146,8 +146,8 @@ int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn);
 
 /// Configure this container from the ask that `word` names, with `primes` as its lens — the share this machine
 /// carries. The ask's leaf is walked out of this container's store (word ‖ 0, word ‖ 1, … to the first cell
-/// nobody has; the records are the count), then the roster and shares it names are set, then the lens (which
-/// must be one share of that roster), then the program's word and the dims. Nothing is kept here: the ask
+/// nobody has; the records are the count), then the roster it names is set, then the lens (which must be one
+/// share of that roster — a contiguous sub-range), then the program's word and the dims. Nothing is kept here: the ask
 /// names the construction and carries none of it, and the program's own leaf is walked when it is started. A
 /// container configured this way starts with slate_dag_start.
 /// @return NULL; "partial" when the door could gather only part of the ask's leaf — a cell on some carriers

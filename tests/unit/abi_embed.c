@@ -382,34 +382,41 @@ int main(void) {
   /* ---- 9. the roster, the share, the ask and the cell word: the doors a placement seam uses ---- */
   {
     Store st; memset(&st, 0, sizeof st);
-    /* a roster of six primes divided into three units: shares are [0,2), [2,4), [4,6) */
+    /* a roster of six primes. A share is a contiguous run of it — that is all the engine says, because every
+       way of dividing a roster hands a unit one such run, and how many units there are is the deployment's
+       rule, never a setting here and never in a word. */
     const int64_t roster[6] = { 1000003, 1000033, 1000037, 1000039, 1000081, 1000099 };
     const int64_t share0[2] = { 1000003, 1000033 };
     const int64_t share1[2] = { 1000037, 1000039 };
-    const int64_t astride[2] = { 1000033, 1000037 };   /* two real primes of the roster, but not one share */
+    const int64_t offcut[2] = { 1000033, 1000037 };    /* a run that straddles a cut into three — still a run */
+    const int64_t gapped[2] = { 1000003, 1000037 };    /* two of the roster's primes with one skipped: no run */
+    const int64_t reversed[2] = { 1000033, 1000003 };  /* the roster's own primes, out of its order: no run */
     const int64_t foreign[2] = { 1000117, 1000121 };   /* not in the roster at all */
 
     SlateDag *b = slate_dag_new();
     slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
-    CHECK(slate_dag_roster(b, roster, 6, 3) == NULL, "9: the roster was refused");
+    CHECK(slate_dag_roster(b, roster, 6) == NULL, "9: the roster was refused");
     /* the roster takes the same prime rule as the lens */
     { const int64_t nonprime[1] = { 1000001 };
-      CHECK(slate_refused(slate_dag_roster(b, nonprime, 1, 1), "args"), "9: a non-prime roster was accepted");
+      CHECK(slate_refused(slate_dag_roster(b, nonprime, 1), "args"), "9: a non-prime roster was accepted");
       const int64_t dup2[2] = { 1000003, 1000003 };
-      CHECK(slate_refused(slate_dag_roster(b, dup2, 2, 1), "args"), "9: a repeated roster prime was accepted");
-      CHECK(slate_dag_roster(NULL, roster, 6, 3) != NULL, "9: a null builder was accepted");
-      CHECK(slate_dag_roster(b, NULL, 3, 3) != NULL, "9: a null roster with k>0 was accepted");
-      CHECK(slate_dag_roster(b, roster, 6, 3) == NULL, "9: the roster was refused on the way back"); }
-    /* the lens must be exactly one share of it */
-    CHECK(slate_refused(slate_dag_lens(b, astride, 2), "args"), "9: a lens astride the split was accepted");
+      CHECK(slate_refused(slate_dag_roster(b, dup2, 2), "args"), "9: a repeated roster prime was accepted");
+      CHECK(slate_dag_roster(NULL, roster, 6) != NULL, "9: a null builder was accepted");
+      CHECK(slate_dag_roster(b, NULL, 3) != NULL, "9: a null roster with k>0 was accepted");
+      CHECK(slate_dag_roster(b, roster, 6) == NULL, "9: the roster was refused on the way back"); }
+    /* the lens must be a contiguous sub-range of it — and nothing else is a share */
+    CHECK(slate_refused(slate_dag_lens(b, gapped, 2), "args"), "9: a lens with a gap in the roster was accepted");
+    CHECK(slate_refused(slate_dag_lens(b, reversed, 2), "args"), "9: a lens out of the roster's order was accepted");
     CHECK(slate_refused(slate_dag_lens(b, foreign, 2), "args"), "9: a lens outside the roster was accepted");
-    CHECK(slate_refused(slate_dag_lens(b, roster, 6), "args"), "9: the whole roster was accepted as one share of three");
     CHECK(slate_refused(slate_dag_lens(b, NULL, 0), "args"), "9: a container carrying a roster was left share-less");
+    CHECK(slate_dag_lens(b, roster, 6) == NULL, "9: the whole roster was refused as a share (the undivided deployment)");
+    CHECK(slate_dag_lens(b, offcut, 2) == NULL, "9: a run of the roster was refused because one division would cut it");
     CHECK(slate_dag_lens(b, share0, 2) == NULL, "9: share 0 was refused");
     CHECK(slate_dag_lens(b, share1, 2) == NULL, "9: share 1 was refused");
-    /* and a split the pinned share no longer fits is refused where it is named */
-    CHECK(slate_refused(slate_dag_shares(b, 2), "args"), "9: a split that leaves the pinned primes astride it was accepted");
-    CHECK(slate_dag_shares(b, 3) == NULL, "9: the roster's own split was refused");
+    /* and a roster the pinned share is no longer a run of is refused where it is named */
+    { const int64_t other[3] = { 1000037, 1000081, 1000039 };
+      CHECK(slate_refused(slate_dag_roster(b, other, 3), "args"), "9: a roster the pinned primes do not run in was accepted");
+      CHECK(slate_dag_roster(b, roster, 6) == NULL, "9: the roster was refused on the way back"); }
 
     /* a run with a roster set names its construction: the ask carries a program word and the dims */
     uint32_t c = slate_dag_carrier(b, NULL, 0);
@@ -434,23 +441,34 @@ int main(void) {
       CHECK(st_get(ask, askn, NULL, 0, &o, &on, &st) != 0, "9: the ask's bytes were kept under the bare word");
       free(o); }
     /* one cell per byte, in put order — the ask reads back off the rows the put left behind, and says exactly
-       what the container carries, in its one fixed order with nothing in front of it: shares, the roster, the
-       dims, and the program's word. Nothing rides beside that word: the taker walks the program's own leaf to
-       the first cell nobody has. Neither construction travels. */
+       what the container carries, in its one fixed order with nothing in front of it: the roster, the dims,
+       and the program's word. No division rides in front of the roster — that is the deployment's rule, not
+       the ask's — and nothing rides beside the program's word: the taker walks the program's own leaf to the
+       first cell nobody has. Neither construction travels. */
     const size_t ncells = st.n - before;
     unsigned char *bytes = (unsigned char *)malloc(ncells ? ncells : 1);
-    int cells_ok = ncells >= 28;
+    int cells_ok = ncells >= 16;
     for (size_t i = 0; cells_ok && i < ncells; i++) {
       int v = st_cell_byte(&st.r[before + i]);
       if (v < 0) cells_ok = 0; else bytes[i] = (unsigned char)v;
     }
     CHECK(cells_ok, "9: the ask's leaf is not one byte cell per byte (%zu rows)", ncells);
     if (cells_ok) {
-      uint32_t shares_r = 0, k_r = 0;
-      for (int i = 0; i < 4; i++) shares_r |= (uint32_t)bytes[i] << (8 * i);
-      for (int i = 0; i < 4; i++) k_r |= (uint32_t)bytes[4 + i] << (8 * i);
-      CHECK(shares_r == 3 && k_r == 6, "9: the ask says shares %u k %u (want 3, 6)", shares_r, k_r);
-      size_t off = 8 + 8 * (size_t)k_r;
+      uint32_t k_r = 0;
+      for (int i = 0; i < 4; i++) k_r |= (uint32_t)bytes[i] << (8 * i);
+      CHECK(k_r == 6, "9: the ask says k %u (want 6) — the roster is the first field, nothing in front of it", k_r);
+      size_t off = 4 + 8 * (size_t)k_r;
+      cells_ok = k_r == 6 && ncells >= off + 20;
+      CHECK(cells_ok, "9: the ask's %zu bytes cannot hold its own fields", ncells);
+    }
+    if (cells_ok) {
+      const size_t off = 4 + 8 * (size_t)6;
+      /* the roster itself, in its own order, right behind the count */
+      for (int j = 0; j < 6; j++) {
+        uint64_t p = 0; for (int i = 0; i < 8; i++) p |= (uint64_t)bytes[4 + 8 * (size_t)j + (size_t)i] << (8 * i);
+        CHECK((int64_t)p == roster[j], "9: the ask's roster prime %d is %llu (want %lld)",
+              j, (unsigned long long)p, (long long)roster[j]);
+      }
       uint32_t nd = 0; for (int i = 0; i < 4; i++) nd |= (uint32_t)bytes[off + i] << (8 * i);
       CHECK(nd == 1, "9: the ask says %u dims (want 1)", nd);
       uint64_t d0 = 0; for (int i = 0; i < 8; i++) d0 |= (uint64_t)bytes[off + 4 + i] << (8 * i);
@@ -538,7 +556,8 @@ int main(void) {
     /* an ask whose share is not one of the roster's, a word nothing is kept under, a leaf the door could only
        half gather (not whole: never the end of a leaf), and the malformed asks */
     { SlateDag *x = slate_dag_new(); slate_dag_codec(x, NULL, st_get, st_put, NULL, 0, &st);
-      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, astride, 2), "args"), "9: an ask taken astride the split");
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, gapped, 2), "args"), "9: an ask taken on a gap in its roster");
+      CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, foreign, 2), "args"), "9: an ask taken on primes outside its roster");
       CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, NULL, 0), "args"), "9: an ask taken with no share");
       uint8_t *junk = (uint8_t *)malloc((size_t)askn); memcpy(junk, ask, (size_t)askn);
       for (uint64_t i = 0; i < askn; i++) junk[i] = (uint8_t)(ask[i] ^ 0xA5);
@@ -549,16 +568,17 @@ int main(void) {
       st.partial = 0;
       free(junk); slate_dag_free(x); }
     /* a malformed ask, now that no bytes travel: the only thing that can lie is the store. Set the leaf's own
-       cells to a roster longer than the leaf, and the reader — which bounds-checks every field against the
-       end it walked to — refuses where it reads rather than guessing at the bytes. Then put them back. */
+       first four cells — the roster's count, the ask's very first field — to a roster longer than the leaf, and
+       the reader, which bounds-checks every field against the end it walked to, refuses where it reads rather
+       than guessing at the bytes. Then put them back. */
     if (cells_ok && ncells) {
       SlateDag *x = slate_dag_new(); slate_dag_codec(x, NULL, st_get, st_put, NULL, 0, &st);
       unsigned char keep[4];
-      for (int i = 0; i < 4; i++) { keep[i] = (unsigned char)st_cell_byte(&st.r[before + 4 + (size_t)i]); }
+      for (int i = 0; i < 4; i++) { keep[i] = (unsigned char)st_cell_byte(&st.r[before + (size_t)i]); }
       const unsigned char huge[4] = { 0xFF, 0xFF, 0xFF, 0x0F };
-      for (int i = 0; i < 4; i++) st_cell_set(&st.r[before + 4 + (size_t)i], huge[i]);
+      for (int i = 0; i < 4; i++) st_cell_set(&st.r[before + (size_t)i], huge[i]);
       CHECK(slate_refused(slate_dag_take_ask(x, ask, askn, share1, 2), "args"), "9: a roster past the ask's end was taken");
-      for (int i = 0; i < 4; i++) st_cell_set(&st.r[before + 4 + (size_t)i], keep[i]);
+      for (int i = 0; i < 4; i++) st_cell_set(&st.r[before + (size_t)i], keep[i]);
       CHECK(slate_dag_take_ask(x, ask, askn, share1, 2) == NULL, "9: the ask put back was refused");
       slate_dag_free(x);
     }
@@ -566,10 +586,10 @@ int main(void) {
     free(ask); free(ask2);
     slate_array_free(arr);
     slate_dag_free(u); slate_dag_free(b); st_free(&st);
-    printf("  roster: the whole lens and its split; a lens must be one share of it; the ask is a leaf named by its word, round trips, and running it by that word hands back the root's word\n");
+    printf("  roster: the whole lens, with no division in it; a lens must be a contiguous run of it; the ask is a leaf named by its word, round trips, and running it by that word hands back the root's word\n");
   }
 
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a leaf, run by name; which leaf is context; a roster's share, its ask and its cell words\n");
+  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a leaf, run by name; which leaf is context; a roster's share is a run of it, its ask carries no division, and its cell words\n");
   return 0;
 }

@@ -2,6 +2,35 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.11.0
+
+- **The division leaves the container, and the word.** How many units a roster is cut into was a setting here
+  and a field in every ask; it is neither now. It is the deployment's rule — the same on every unit, read at
+  start and asked of the placement seam — so re-dividing a roster changes no word it ever named and forces no
+  recompute. What the engine says about a share is the one thing that survives any division: it is a
+  contiguous run of the roster.
+- **Breaking, `slate_dag_roster` loses its `shares`:**
+  `const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k)` — was
+  `(SlateDag *, const int64_t *primes, uint32_t k, uint32_t shares)`. It sets the roster and nothing else.
+  A caller that passed a share count drops the argument; nothing replaces it in this band.
+- **Breaking, `slate_dag_shares` is removed.** There is no door for a division on a container. Callers that set
+  it beside `slate_dag_lens` delete the call.
+- **Breaking, `slate_dag_lens` takes any contiguous sub-range of the roster.** With a roster set, `primes` must
+  be `roster[lo, hi)` for some `0 <= lo < hi <= k` — which is what every division of a roster hands a unit —
+  else `"args"`. Wider than before (a run that one particular division would cut is now a share, and so is the
+  whole roster: the undivided deployment) and no looser where it counts: a set with a gap, one out of the
+  roster's order, one with a prime from outside it, and `k` 0 with a roster set are all still `"args"`.
+- **Breaking, the ask's byte format loses its first field:**
+  `[k u32][roster prime i64]*k [ndims u32][dim i64]*ndims [wn u64][program word u8]*wn` — was
+  `[shares u32][k u32][roster prime i64]*k …`. Still little-endian, fixed order, byte exact, no tag and no
+  version; the roster's count is now the very first thing in it. An ask written by 0.10.0 does not read here.
+- `slate_dag_take_ask` and `slate_dag_run_ask` are otherwise unchanged, signatures included. `run_ask`'s
+  stopped state ("this unit carries one share of a roster someone else carries") is read off the primes — a
+  lens that is a proper run of the roster — rather than off a share count.
+- Tests (`tests/unit/abi_embed.c`, block 9): the ask's first field is the roster's count and the roster follows
+  it; a lens with a gap, out of order, or outside the roster refuses, the whole roster and an off-cut run are
+  taken; a roster the pinned primes do not run in refuses; no `shares` door anywhere.
+
 ## 0.10.0
 
 - **The ask is a leaf, run by its word.** Two packets and no third: the cells under a word, and a row under a

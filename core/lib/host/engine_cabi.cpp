@@ -309,33 +309,14 @@ static const char *lens_primes_of(const int64_t *primes, uint32_t k, std::vector
   return nullptr;
 }
 
-/* The split rule, one body: a roster of k primes divides into n = min(shares, k) units (shares 0 or 1: one
- * unit, the whole roster), and unit j carries roster[j*k/n, (j+1)*k/n). The placement door in front of the
- * engine runs the same arithmetic, so the two name the same share. */
-static uint32_t roster_units(uint32_t shares, size_t k) {
-  if (!k) return 0;
-  const uint32_t n = shares < 2 ? 1u : shares;
-  return n > (uint32_t)k ? (uint32_t)k : n;
-}
-static bool roster_share_bounds(size_t k, uint32_t n, uint32_t j, size_t &lo, size_t &hi) {
-  if (!n || j >= n) return false;
-  lo = (size_t)(((uint64_t)j * (uint64_t)k) / n);
-  hi = (size_t)((((uint64_t)j + 1) * (uint64_t)k) / n);
-  return lo < hi;
-}
-/* is `ps` exactly one share of `roster` under `shares`? */
-static bool roster_share_index(const std::vector<int64_t> &roster, uint32_t shares,
-                               const std::vector<int64_t> &ps, uint32_t *out_j) {
-  const uint32_t n = roster_units(shares, roster.size());
-  for (uint32_t j = 0; j < n; j++) {
-    size_t lo = 0, hi = 0;
-    if (!roster_share_bounds(roster.size(), n, j, lo, hi)) continue;
-    if (hi - lo != ps.size()) continue;
-    if (std::equal(roster.begin() + (ptrdiff_t)lo, roster.begin() + (ptrdiff_t)hi, ps.begin())) {
-      if (out_j) *out_j = j;
-      return true;
-    }
-  }
+/* What a share is, one body: a contiguous sub-range of the roster — roster[lo, hi) for some 0 <= lo < hi <= k.
+ * Every division of a roster hands each unit exactly one such run, so this is the whole of what the engine can
+ * say about a share. How many units there are, and which run is this one's, is the deployment's rule — the same
+ * on every unit, read at start and asked of the seam — never a container's setting and never in a word. */
+static bool roster_subrange(const std::vector<int64_t> &roster, const std::vector<int64_t> &ps) {
+  if (ps.empty() || ps.size() > roster.size()) return false;
+  for (size_t lo = 0; lo + ps.size() <= roster.size(); lo++)
+    if (std::equal(ps.begin(), ps.end(), roster.begin() + (ptrdiff_t)lo)) return true;
   return false;
 }
 
@@ -344,31 +325,21 @@ extern "C" const char *slate_dag_lens(SlateDag *b, const int64_t *primes, uint32
   std::vector<int64_t> ps;
   if (const char *rc = lens_primes_of(primes, k, ps)) return rc;
   Slate::engine::ChannelPolicy &cp = b->arena.env().channels;
-  /* with a roster set these are the channels this container computes: exactly one share of it, never a set that
-     straddles the split (and never none — a container carrying a roster carries one of its shares). */
-  if (!cp.roster.empty() && !roster_share_index(cp.roster, cp.shares, ps, nullptr)) return "args";
+  /* with a roster set these are the channels this container computes: one share of it, which is a contiguous
+     run of its primes (and never none — a container carrying a roster carries one of its shares). */
+  if (!cp.roster.empty() && !roster_subrange(cp.roster, ps)) return "args";
   cp.primes = std::move(ps);
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
-extern "C" const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k, uint32_t shares) {
+extern "C" const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k) {
   if (!b || (k && !primes)) return "args";
   std::vector<int64_t> rs;
   if (const char *rc = lens_primes_of(primes, k, rs)) return rc;
   Slate::engine::ChannelPolicy &cp = b->arena.env().channels;
-  /* a lens already pinned must still be one share of the roster being set — the two are one statement */
-  if (!rs.empty() && !cp.primes.empty() && !roster_share_index(rs, shares, cp.primes, nullptr)) return "args";
+  /* a lens already pinned must still be a share of the roster being set — the two are one statement */
+  if (!rs.empty() && !cp.primes.empty() && !roster_subrange(rs, cp.primes)) return "args";
   cp.roster = std::move(rs);
-  cp.shares = shares;
-  b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
-  return nullptr;
-}
-extern "C" const char *slate_dag_shares(SlateDag *b, uint32_t shares) {
-  if (!b) return "args";
-  Slate::engine::ChannelPolicy &cp = b->arena.env().channels;
-  if (!cp.roster.empty() && !cp.primes.empty() && !roster_share_index(cp.roster, shares, cp.primes, nullptr))
-    return "args";                                  /* the new split would leave this container's primes astride it */
-  cp.shares = shares;
   b->arena.env().config_set |= Slate::Envelope::CFG_CHANNELS;
   return nullptr;
 }
@@ -836,7 +807,7 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
 /* ---- the ask: a container's run context as bytes, so another machine runs the same construction on its own
  * share. Host's own format, little-endian, fixed order and byte exact (embed.h spells it):
  *
- *     [shares u32][k u32][roster prime i64] * k
+ *     [k u32][roster prime i64] * k
  *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn
  *
  * Nothing rides in front of it: no tag byte, no version byte. The construction does not travel — only its word
@@ -844,7 +815,9 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
  * carrying machines and the taker walks it back through the same door it reads any other row through. There is
  * no count beside the word: the taker walks the cells to the first one nobody has, and the records are the
  * count. `wn` 0 is no program. Which share the taker carries is the taker's own primes, handed to
- * slate_dag_take_ask beside the ask.
+ * slate_dag_take_ask beside the ask. The division — how many units the roster is cut into — is not here and
+ * never was in a word: it is the deployment's rule, the same on every unit, so re-dividing a roster leaves
+ * every word it ever named unchanged.
  *
  * The ask itself travels the same way: these bytes are kept as a leaf on the roster lens, exactly as the
  * construction is (leaf_put, one cell per byte under the word of the lens in the clear ‖ the bytes), and what
@@ -875,7 +848,6 @@ extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try 
   const uint8_t *w = e.program.data();
   const size_t wn = e.program.size();
   std::vector<uint8_t> a;
-  ask_put_u32(a, e.channels.shares);
   ask_put_u32(a, (uint32_t)roster.size());
   for (int64_t p : roster) ask_put_u64(a, (uint64_t)p);
   ask_put_u32(a, (uint32_t)b->dims_buf.size());
@@ -907,8 +879,8 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
     return partial ? "partial" : "args";
   const uint64_t n = (uint64_t)ask.size();
   AskRd r{ ask.data(), n, 0 };
-  uint32_t shares = 0, rk = 0, ndims = 0;
-  if (!r.u32v(shares) || !r.u32v(rk)) return "args";
+  uint32_t rk = 0, ndims = 0;
+  if (!r.u32v(rk)) return "args";
   std::vector<int64_t> roster(rk);
   for (uint32_t i = 0; i < rk; i++) if (!r.i64v(roster[i])) return "args";
   if (!r.u32v(ndims)) return "args";
@@ -918,11 +890,11 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   if (!r.u64v(pwn) || r.cur + pwn > r.n) return "args";
   const uint8_t *prog = ask.data() + r.cur;
   r.cur += pwn;
-  /* the roster and the split first, then this machine's own share of it, then what to run and over what. The
-     lens goes first so an ask always lands on a fresh statement — a container's old primes are not a reason
-     to refuse the roster its ask names. */
+  /* the roster first, then this machine's own share of it, then what to run and over what. The lens is cleared
+     first so an ask always lands on a fresh statement — a container's old primes are not a reason to refuse
+     the roster its ask names. */
   b->arena.env().channels.primes.clear();
-  if (const char *rc = slate_dag_roster(b, rk ? roster.data() : nullptr, rk, shares)) return rc;
+  if (const char *rc = slate_dag_roster(b, rk ? roster.data() : nullptr, rk)) return rc;
   if (const char *rc = slate_dag_lens(b, k ? primes : nullptr, k)) return rc;
   /* the construction does not travel: the ask names it by its word, and this container walks the leaf out of
      its own store through the same door as any other row — with a roster, the share it carries, gathered whole
@@ -961,7 +933,10 @@ extern "C" const char *slate_dag_run_ask(SlateDag *b, const uint8_t *word, uint6
   const int rc0 = Slate::store_get_rc(a->codec, cw, (size_t)cwn, row);
   std::free(cw);
   const Slate::Envelope &e = b->arena.env();
-  const bool carries_share = !e.channels.roster.empty() && e.channels.shares >= 2 && !e.channels.primes.empty();
+  /* this unit carries one share of a roster someone else also carries: its lens is a proper run of the roster,
+     so there are other carriers whose rows the gather is reporting nothing for. The division itself is never
+     read here — the primes say it. */
+  const bool carries_share = !e.channels.primes.empty() && e.channels.primes.size() < e.channels.roster.size();
   slate_array_free(a);
   if (rc0 != 0 && rc0 != 2 && !(rc0 == 1 && carries_share)) { std::free(rw); return "refused"; }
   *root = rw; *rn = rwn;                         /* on a reading, the root's word — whole or stopped */
