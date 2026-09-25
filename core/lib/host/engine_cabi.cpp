@@ -9,7 +9,6 @@
 // contracts live on those declarations.
 #include <functional>
 #include <unistd.h>      /* the engine's built-in fd byte-stream: read/write/close */
-#include <poll.h>        /* accept polls with a timeout so a blocked wait stays cancellable */
 #include "slate/providers/host/io.hpp"   /* the file/tcp open providers + install_io_providers() */
 #include "slate/engine/engine.hpp"
 #include "slate/engine/ops.hpp"
@@ -93,31 +92,22 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
    * cross-container fd number is refused, so co-tenant containers in one process can't reach each other's fds. */
   if (ctx && ctx->mem && !ctx->mem->owned_fds.count((int)fd)) return 1;
 
-  /* poll a host fd with the cancel gate before a blocking verb, so a stalled socket read/write can't hang a server
-   * (a regular file polls ready immediately). No gate installed: skip polling and let the syscall run. */
-  auto wait_ready = [&](short events) -> int {
-    if (!(ctx && ctx->proceed)) return 0;
-    for (;;) {
-      if (!ctx->proceed(ctx->proceed_user)) return -1;
-      struct pollfd pfd; pfd.fd = (int)fd; pfd.events = events; pfd.revents = 0;
-      int pr = ::poll(&pfd, 1, 200);
-      if (pr < 0) return -1;
-      if (pr > 0) return 0;
-    }
-  };
+  /* the cancel gate is asked once, at the effect boundary, before a blocking verb — and then the verb runs and
+   * the wire holds it. Nothing here waits on a timer to ask again. No gate installed: the verb runs. */
+  auto gate = [&]() -> int { return (ctx && ctx->proceed && !ctx->proceed(ctx->proceed_user)) ? -1 : 0; };
 
   if (is_read) {
     if (rn < 4) return 1;
     uint32_t chunk = (uint32_t)rest[0] | ((uint32_t)rest[1] << 8) | ((uint32_t)rest[2] << 16) | ((uint32_t)rest[3] << 24);
     if (chunk == 0 || chunk > (1u << 30)) return 1;
-    if (wait_ready(POLLIN)) return 1;                            /* cancelled while waiting for data */
+    if (gate()) return 1;                                        /* cancelled at the boundary */
     uint8_t *buf = (uint8_t *)std::malloc(chunk); if (!buf) return 1;
     ssize_t r = ::read((int)fd, buf, chunk); if (r < 0) { std::free(buf); return 1; }
     *out = buf; *outn = (uint64_t)r; return 0;
   }
   if (is_write) {
     if (nops < 2) return 1;
-    if (wait_ready(POLLOUT)) return 1;                           /* cancelled while waiting to send */
+    if (gate()) return 1;                                        /* cancelled at the boundary */
     uint64_t n = ops[1].n; uint8_t *tmp = (uint8_t *)std::malloc(n ? n : 1); if (!tmp) return 1;
     for (uint64_t i = 0; i < n; i++) tmp[i] = sl_opbyte(&ops[1], i);
     ssize_t w = ::write((int)fd, tmp, (size_t)n); std::free(tmp); if (w < 0) return 1;
@@ -132,23 +122,15 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
     return ret8(0);
   }
   if (is_accept) {                                             /* a new client fd off a listening fd */
-    /* poll with a short timeout so a blocked accept stays cancellable: between polls, ask the gate whether to keep
-     * waiting. Without a gate this is a plain blocking accept. */
-    for (;;) {
-      if (ctx && ctx->proceed && !ctx->proceed(ctx->proceed_user)) return 1;   /* cancelled while waiting */
-      struct pollfd pfd; pfd.fd = (int)fd; pfd.events = POLLIN; pfd.revents = 0;
-      int pr = ::poll(&pfd, 1, (ctx && ctx->proceed) ? 200 : -1);
-      if (pr < 0) return 1;
-      if (pr == 0) continue;                                   /* timed out: re-check the gate and wait again */
-      int c = ::accept((int)fd, nullptr, nullptr);
-      if (c < 0) return 1;
-      if (ctx && ctx->mem) {                                   /* the accepted client fd counts against the cap + is owned */
-        if (ctx->mem->open_host_fds >= ctx->mem->host_fd_cap) { ::close(c); return 1; }
-        ctx->mem->open_host_fds++;
-        ctx->mem->owned_fds.insert(c);
-      }
-      return ret8((int64_t)c);
+    if (gate()) return 1;                                      /* cancelled at the boundary */
+    int c = ::accept((int)fd, nullptr, nullptr);               /* the wire holds it until a client comes */
+    if (c < 0) return 1;
+    if (ctx && ctx->mem) {                                     /* the accepted client fd counts against the cap + is owned */
+      if (ctx->mem->open_host_fds >= ctx->mem->host_fd_cap) { ::close(c); return 1; }
+      ctx->mem->open_host_fds++;
+      ctx->mem->owned_fds.insert(c);
     }
+    return ret8((int64_t)c);
   }
   return 1;
 }
@@ -258,7 +240,7 @@ extern "C" const char *slate_dag_width(SlateDag *b, uint32_t prec_bits) {
 }
 extern "C" const char *slate_dag_work(SlateDag *b, uint64_t cap) {
   if (!b) return "args";
-  b->arena.env().work_cap = cap;                  /* real-read refine-iteration cap; 0 = the loop's own cap */
+  b->arena.env().work_cap = cap;                  /* the declared work: a real read's refine steps, a run's ticks */
   return nullptr;
 }
 extern "C" const char *slate_dag_mem(SlateDag *b, uint64_t bytes) {
@@ -686,9 +668,25 @@ extern "C" int32_t slate_dag_asr(SlateDag *b, int32_t x, int32_t sh) try {
  * one whose leaf is not whole yet — ends the service with a refusal, never a wrong tick. The tick writes its own hand-off back to this
  * container's tail slot, which this loop reads; a tick that hands off to nothing ends the trampoline. The result
  * buffer owns its cells (outlives the tick builder), so each tick's builder is freed — nothing accumulates. */
+/* The tail loop is the one loop a program can make, and it is bounded the way every read is: by the work the
+ * container declared (slate_dag_work — the Potential's work axis, the same cap a real read spends its refine steps
+ * against). Each tick is one step of that work. A run that spends it all stops with the last tick's reading,
+ * Incomplete with obligation Resume; run again with a larger bound and every tick already kept is a hit. No
+ * clock is read: a bound is declared before the work, never measured during it. 0 = no bound. */
 static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, const std::vector<long long> &dv,
                                      Slate::ArrayReading ar) {
+  const uint64_t cap = b->arena.env().work_cap;
+  uint64_t ticks = 0;
   while (b->tail_flag_buf) {
+    if (cap && ticks >= cap) {                  /* the declared work is spent: stop, and say it can resume */
+      /* the last tick's reading keeps its value — it is a reading, exactly as a real read that ran out of work
+         keeps its bracket; what is not finished is the run, so it closes Incomplete and owes a Resume */
+      ar.frame_.closure = Slate::Receipt::Closure::Incomplete;
+      ar.frame_.required_obligation = Slate::Receipt::Obligation::Resume;
+      ar.frame_.work_spent += ticks;
+      return ar;
+    }
+    ticks++;
     b->tail_flag_buf = false;
     if (!b->tail_prog_buf.empty()) { cur.swap(b->tail_prog_buf); b->tail_prog_buf.clear(); }   /* hand off to a new program */
     else if (cur.empty()) break;               /* a repeat-tail before any named hand-off: nothing to repeat */
@@ -859,6 +857,19 @@ extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try 
      all that leaves — an Interest for it is "run this ask". A store that kept nothing refuses. */
   const Slate::Word key = b->arena.leaf_key(a.data(), a.size());
   if (key.empty() || !Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, a.data(), a.size()))
+    return 1;
+  uint8_t *o = (uint8_t *)std::malloc(key.size());
+  if (!o) return 1;
+  std::memcpy(o, key.data(), key.size());
+  *word = o; *wn_out = (uint64_t)key.size();
+  return 0;
+} catch (...) { return 1; }
+
+/* bytes handed in: the same door as the ask above, with the bytes the caller's */
+extern "C" int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn_out) try {
+  if (!b || !bytes || !n || !word || !wn_out) return 1;
+  const Slate::Word key = b->arena.leaf_key(bytes, (size_t)n);
+  if (key.empty() || !Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, bytes, (size_t)n))
     return 1;
   uint8_t *o = (uint8_t *)std::malloc(key.size());
   if (!o) return 1;

@@ -2,6 +2,23 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.12.0
+
+`slate_dag_leaf(b, bytes, n, &word, &wn)`: bytes handed in are kept as a leaf through the container's own door —
+the same `leaf_key` / `leaf_put` the ask and a fragment go through, one cell per byte on the roster, sliced across
+the carriers — and the leaf's word comes back. It is how a unit keeps bytes a client hands it, so no byte is
+ever kept raw. A compatible addition to the C ABI.
+
+The host effect's read, write and accept no longer wait on a timer. They asked the cancel gate every 200 ms
+around a `poll`; the gate is asked once, at the effect boundary, and the verb runs and the wire holds it. The
+embedder gate's fiber block no longer sleeps to make its four hosts answer late: each answers once all four have
+begun, which is all four parked at once.
+
+The declared work bounds a program's ticks. `slate_dag_work` was a real read's refine-step cap; it is now the
+container's work, and a program that tails into the next — or into itself — spends one step of it per tick. A run
+that spends it stops with its last tick's reading, Incomplete with obligation Resume; a run with a larger bound
+replays every kept tick as a hit. Nothing reads a clock to stop a run.
+
 ## 0.11.0
 
 - **The division leaves the container, and the word.** How many units a roster is cut into was a setting here

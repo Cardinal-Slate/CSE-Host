@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "slate/slate.h"
 #include "slate/embed.h"
+#include "slate/tune.h"
 
 static int fails = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("  FAIL " __VA_ARGS__); printf("\n"); } } while (0)
@@ -84,17 +85,27 @@ static const char *const CAP_GENERIC[] = { "generic" };
 static const char *const CAP_OTHER[] = { "other" };
 static int32_t fx(SlateDag *b, const char *blob) { return slate_dag_effect(b, "generic", (const uint8_t *)blob, strlen(blob), NULL, 0); }
 
-/* ---- async: begin hands the slot to a thread that completes it after a short wait ---- */
-typedef struct { void *slot; int64_t reply; int ms; } Pending;
+/* ---- async: begin hands the slot to a thread that completes it once every task has begun ----
+   A task begins its host when its fiber parks on the miss, so "every task has begun" is "every task is parked
+   at once". The completer waits for exactly that and then answers: the overlap is ordered, not timed. */
+enum { kTasks = 4 };
+static pthread_mutex_t g_begun_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_begun_cv = PTHREAD_COND_INITIALIZER;
+static int g_begun = 0;
+typedef struct { void *slot; int64_t reply; } Pending;
 static void *completer(void *u) {
-  Pending *p = (Pending *)u; usleep((useconds_t)p->ms * 1000);
+  Pending *p = (Pending *)u;
+  pthread_mutex_lock(&g_begun_mu);
+  while (g_begun < kTasks) pthread_cond_wait(&g_begun_cv, &g_begun_mu);
+  pthread_mutex_unlock(&g_begun_mu);
   uint8_t d[8]; uint64_t v = (uint64_t)p->reply; for (int i = 0; i < 8; i++) d[i] = (uint8_t)(v >> (8 * i));
   slate_effect_complete(p->slot, d, 8); free(p); return NULL;
 }
-typedef struct { int begins; int64_t reply; int ms; } AsyncHost;
+typedef struct { int begins; int64_t reply; } AsyncHost;
 static int host_begin(const char *cls, const uint8_t *req, uint64_t reqn, void *slot, void *u) {
   (void)cls; (void)req; (void)reqn; AsyncHost *h = (AsyncHost *)u; h->begins++;
-  Pending *p = (Pending *)malloc(sizeof *p); p->slot = slot; p->reply = h->reply; p->ms = h->ms;
+  pthread_mutex_lock(&g_begun_mu); g_begun++; pthread_cond_broadcast(&g_begun_cv); pthread_mutex_unlock(&g_begun_mu);
+  Pending *p = (Pending *)malloc(sizeof *p); p->slot = slot; p->reply = h->reply;
   pthread_t t; pthread_create(&t, NULL, completer, p); pthread_detach(t); return 0;
 }
 typedef struct { AsyncHost host; Store st; int64_t got; int rc; const char *blob; } Task;
@@ -108,7 +119,7 @@ static void task_run(void *u) {
   t->rc = run1(b, slate_dag_add(b, fx(b, t->blob), slate_dag_lit(b, 1)), &t->got);
   slate_dag_free(b); st_free(&t->st);
 }
-static void scope_body(SlateScope *s, void *u) { Task *ts = (Task *)u; for (int i = 0; i < 4; i++) slate_scope_spawn(s, task_run, &ts[i]); }
+static void scope_body(SlateScope *s, void *u) { Task *ts = (Task *)u; for (int i = 0; i < kTasks; i++) slate_scope_spawn(s, task_run, &ts[i]); }
 
 static int proceed_no(void *u) { (*(int *)u)++; return 0; }
 
@@ -170,13 +181,13 @@ int main(void) {
 
   /* ---- 4. fibers: four tasks with async hosts overlap their waits on one scope; each reads its own value ---- */
   {
-    Task ts[4]; const char *blobs[4] = { "a", "b", "c", "d" };
-    for (int i = 0; i < 4; i++) { memset(&ts[i], 0, sizeof ts[i]); ts[i].host.reply = 100 + i; ts[i].host.ms = 30; ts[i].rc = -1; ts[i].blob = blobs[i]; }
+    Task ts[kTasks]; const char *blobs[kTasks] = { "a", "b", "c", "d" };
+    for (int i = 0; i < kTasks; i++) { memset(&ts[i], 0, sizeof ts[i]); ts[i].host.reply = 100 + i; ts[i].rc = -1; ts[i].blob = blobs[i]; }
     slate_scope_run(scope_body, ts);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < kTasks; i++)
       CHECK(ts[i].rc == 0 && ts[i].got == 101 + i && ts[i].host.begins == 1,
             "4: task %d rc %d got %lld begins %d", i, ts[i].rc, (long long)ts[i].got, ts[i].host.begins);
-    printf("  fibers: four tasks in one scope, each parked on its own async host and woke with its own value\n");
+    printf("  fibers: four tasks in one scope, all four parked at once on their own async hosts, each woke with its own value\n");
   }
 
   /* ---- 5. search: by shape (measurement) and by computation (the aggregate of a collection) ---- */
@@ -589,7 +600,53 @@ int main(void) {
     printf("  roster: the whole lens, with no division in it; a lens must be a contiguous run of it; the ask is a leaf named by its word, round trips, and running it by that word hands back the root's word\n");
   }
 
+  /* ---- 9. the work a container declares bounds its ticks: a program that tails into itself stops Incomplete when
+     its declared work is spent — no clock anywhere — and, run again with room, replays what it kept and closes: a
+     tick over the same state is a hit, tail and all, so a loop that changes nothing ends on its own ---- */
+  {
+    Store st; memset(&st, 0, sizeof st);
+    static const char *const CAP_SELF[] = { "slate.emit", "slate.run", "slate.tail" };
+    SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+    slate_dag_effect_caps(b, CAP_SELF, 3);
+    uint32_t ct = slate_dag_effect_io(b, "slate.tail", NULL, 0, NULL, 0, 8);   /* no operand: a repeat tail */
+    int32_t root = slate_dag_add(b, slate_dag_load(b, ct, slate_dag_lit(b, 0)), slate_dag_lit(b, 7));
+    uint8_t *pw = NULL; uint64_t pn = 0;
+    const char *se = slate_dag_save_fragment(b, root, NULL, 0, &pw, &pn);
+    CHECK(se == NULL && pn > 0, "9: the program that tails into itself was not kept (%s)", se ? se : "no word");
+    slate_dag_free(b);
+    if (se == NULL && pn > 0) {
+      const int64_t one = 1;
+      SlateDag *e = slate_dag_new(); slate_dag_codec(e, NULL, st_get, st_put, NULL, 0, &st);
+      slate_dag_effect_caps(e, CAP_SELF, 3);
+      CHECK(slate_dag_work(e, 1) == NULL, "9: the work bound refused");
+      CHECK(slate_dag_program(e, pw, pn) == NULL, "9: setting the program refused");
+      SlateArray *a = slate_dag_start(e, &one, 1);
+      CHECK(a != NULL, "9: a bounded loop handed back no reading");
+      if (a) {
+        const slate_entry *en; int32_t n = 0; slate_array_receipt(a, &en, &n);
+        CHECK(slate_entry_is(en, n, "closure", "incomplete"), "9: the loop spent its one tick and did not say Incomplete");
+        int64_t num = 0, den = 1;
+        CHECK(slate_array_i64_unsafe(a, &num, &den) == NULL && num == 7 && den == 1, "9: the last tick read %lld (want 7)", (long long)num);
+        slate_array_free(a);
+      }
+      /* again with room: the kept tick is a hit, the tail with it, and the run closes */
+      CHECK(slate_dag_work(e, 0) == NULL, "9: clearing the work bound refused");
+      a = slate_dag_start(e, &one, 1);
+      CHECK(a != NULL, "9: the resumed loop handed back no reading");
+      if (a) {
+        const slate_entry *en; int32_t n = 0; slate_array_receipt(a, &en, &n);
+        CHECK(slate_entry_is(en, n, "closure", "closed"), "9: the resumed loop did not close");
+        int64_t num = 0, den = 1;
+        CHECK(slate_array_i64_unsafe(a, &num, &den) == NULL && num == 7 && den == 1, "9: the resumed loop read %lld (want 7)", (long long)num);
+        slate_array_free(a);
+      }
+      slate_dag_free(e);
+    }
+    free(pw); st_free(&st);
+    printf("  work: a program that tails into itself stops Incomplete when its declared work is spent, and run again with room replays what it kept and closes\n");
+  }
+
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a leaf, run by name; which leaf is context; a roster's share is a run of it, its ask carries no division, and its cell words\n");
+  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; search by shape and by computation; a pinned share is its own row and refuses a bad modulus; a program is a leaf, run by name; which leaf is context; a roster's share is a run of it, its ask carries no division, and its cell words; the declared work bounds a program's ticks\n");
   return 0;
 }

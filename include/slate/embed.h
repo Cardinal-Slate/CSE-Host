@@ -144,6 +144,15 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
 /// @return 0; nonzero on a null argument, a store that kept nothing, or a buffer that could not be allocated.
 int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn);
 
+/// Keep `bytes` as a leaf and hand back the leaf's word: the same door the ask and a fragment go through — one
+/// cell per byte (sign, A = the byte, B = 1) under word ‖ 0, word ‖ 1, …, on the roster lens when this container
+/// carries a share of one, sliced across the carriers by the codec it was given. The word is the lens in the clear
+/// ‖ the bytes, named by that codec. Nothing is kept under the bare word, and no byte is ever kept raw. A leaf
+/// already kept is a hit and is not put again. *word/*wn is a malloc'd copy, freed by the caller with free().
+/// @return 0; nonzero on a null argument, no bytes, a store that kept nothing, or a buffer that could not be
+///         allocated.
+int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn);
+
 /// Configure this container from the ask that `word` names, with `primes` as its lens — the share this machine
 /// carries. The ask's leaf is walked out of this container's store (word ‖ 0, word ‖ 1, … to the first cell
 /// nobody has; the records are the count), then the roster it names is set, then the lens (which must be one

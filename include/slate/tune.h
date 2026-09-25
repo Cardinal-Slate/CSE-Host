@@ -42,7 +42,10 @@ const char *slate_dag_trace(SlateDag *b, slate_emit emit, void *user);
 /// Sets the real-read bracket width target (2^-prec_bits) — how tightly a real value is resolved.
 const char *slate_dag_width(SlateDag *b, uint32_t prec_bits);
 
-/// Caps a real read's refine iterations (0 = the loop's own cap). Bounds work on a value that refines forever.
+/// The work this container may spend: a real read's refine iterations, and the ticks of a program that tails into
+/// the next (0 = the loop's own cap for a read, no bound for ticks). Bounds work on a value that refines forever and
+/// on a program that loops for ever. A run that spends it stops Incomplete with obligation Resume; run again with a
+/// larger cap and every step already kept is a hit. A bound is declared before the work — nothing reads a clock.
 const char *slate_dag_work(SlateDag *b, uint64_t cap);
 
 /// Caps per-read scratch at `bytes`; a real read that would exceed it refuses rather than exhausting memory.
