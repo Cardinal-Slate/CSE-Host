@@ -1,10 +1,11 @@
 /* The io door names an open resource by the word of the effect that opened it — never by its fd. From pure C over
- * the array ABI: mount a tmpfs, open a file for writing, write, close, open it for reading, read it back through the
+ * the array ABI: mount a directory, open a file for writing, write, close, open it for reading, read it back through the
  * words the opens returned; two builders opening the same path get the same word (content, not a handle); a read
  * presenting a word no open produced refuses. No C++ in this translation unit. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "slate/slate.h"
 #include "slate/embed.h"
 
@@ -17,6 +18,7 @@ static const uint8_t READ16[] = { 'r', 'e', 'a', 'd', 0, 16, 0, 0, 0 };   /* rea
 static const char *const IO = "io";
 static const char *const CAPS[] = { "io" };
 
+static char g_dir[256];   /* the directory mounted at /t: a real one, made for this gate and removed after */
 static int fails = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL io_word_cabi: %s\n", msg); fails++; } } while (0)
 
@@ -39,7 +41,7 @@ static int read_cells(SlateDag *b, uint32_t cid, int64_t n, int64_t *out) {
  * read result carrier. */
 static void chain(SlateDag *b, uint32_t *open_w, uint32_t *read_out) {
   slate_dag_effect_caps(b, CAPS, 1);
-  slate_dag_tmpfs(b, "/t", 1);
+  slate_dag_mount(b, "/t", g_dir, 1);
   uint32_t addr = slate_dag_carrier_bytes(b, (const uint8_t *)"file:/t/x", 9);
   *open_w = slate_dag_effect_io(b, IO, OPEN_W, sizeof OPEN_W, &addr, 1, 64);   /* open for writing */
   uint32_t data = slate_dag_carrier_bytes(b, (const uint8_t *)"hello", 5);
@@ -51,6 +53,8 @@ static void chain(SlateDag *b, uint32_t *open_w, uint32_t *read_out) {
 }
 
 int main(void) {
+  { const char *t = getenv("TMPDIR"); snprintf(g_dir, sizeof g_dir, "%s/slate-io-XXXXXX", (t && *t) ? t : "/tmp"); }
+  if (!mkdtemp(g_dir)) { printf("FAIL io_word_cabi: no directory to mount\n"); return 1; }
   /* 1. the bytes come back through the words: the resource is reached by name, never by fd */
   int64_t w1[8] = {0};
   {
@@ -61,8 +65,8 @@ int main(void) {
     CHECK(read_cells(b, read_out, 5, got) == 0, "read through the open's word ran");
     CHECK(got[0] == 'h' && got[1] == 'e' && got[2] == 'l' && got[3] == 'l' && got[4] == 'o', "read back the bytes written");
     CHECK(read_cells(b, open_w, 8, w1) == 0, "the open's out carrier is readable");
-    /* the open returned a word (8 bytes under the default encoder), not the tmpfs handle number (2^40 as 8 LE bytes) */
-    int is_fd = (w1[0] == 0 && w1[1] == 0 && w1[2] == 0 && w1[3] == 0 && w1[4] == 0 && w1[5] == 1 && w1[6] == 0 && w1[7] == 0);
+    /* the open returned a word (8 bytes under the default encoder), not the host fd number (a small int in 8 LE bytes) */
+    int is_fd = (w1[0] >= 0 && w1[0] < 128 && w1[1] == 0 && w1[2] == 0 && w1[3] == 0 && w1[4] == 0 && w1[5] == 0 && w1[6] == 0 && w1[7] == 0);
     int nonzero = 0; for (int i = 0; i < 8; i++) if (w1[i]) nonzero = 1;
     CHECK(!is_fd && nonzero, "the open returned the effect's word, not the fd");
     slate_dag_free(b);
@@ -81,7 +85,7 @@ int main(void) {
   {
     SlateDag *b = slate_dag_new();
     slate_dag_effect_caps(b, CAPS, 1);
-    slate_dag_tmpfs(b, "/t", 1);
+    slate_dag_mount(b, "/t", g_dir, 1);
     uint8_t fake[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
     uint32_t bogus = slate_dag_carrier_bytes(b, fake, 8);
     uint32_t out = slate_dag_effect_io(b, IO, READ16, sizeof READ16, &bogus, 1, 16);
@@ -89,6 +93,7 @@ int main(void) {
     CHECK(read_cells(b, out, 1, got) == -1, "a read on an unknown word refuses");
     slate_dag_free(b);
   }
+  { char f[300]; snprintf(f, sizeof f, "%s/x", g_dir); unlink(f); rmdir(g_dir); }
   if (fails == 0) printf("PASS io_word_cabi: an open resource is named by its effect's word; read by name; unknown word refuses\n");
   return fails ? 1 : 0;
 }

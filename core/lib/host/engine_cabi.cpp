@@ -1,5 +1,5 @@
 // The C ABI door: slate/slate.h (build a record, run it, read the reading), slate/embed.h (an embedder's effects,
-// sandbox, async, search) and slate/tune.h (cost knobs) over Slate::DagBuild.
+// sandbox, async) and slate/tune.h (cost knobs) over Slate::DagBuild.
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
@@ -16,7 +16,6 @@
 #include "slate/embed.h"
 #include "slate/tune.h"
 #include "slate/dag/build.hpp"
-#include "slate/dag/search.hpp"   /* DagBuild::search — the S axis, exposed as slate_dag_search */
 #include "slate/async/scope.hpp"   /* the fiber runtime — compiled into the archive so async is a pure-C surface */
 #include "slate/engine/context.hpp"
 #include "slate/trace.h"
@@ -63,34 +62,9 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
              is_close = Slate::blob_verb_is(blob, blen, "close"), is_accept = Slate::blob_verb_is(blob, blen, "accept");
   uint64_t rn = 0; const uint8_t *rest = Slate::blob_verb_rest(blob, blen, &rn);   /* the verb's own bytes */
 
-  /* a tmpfs handle: route to the per-container ram store, not a syscall (the fd is marked above any host fd). */
-  if (ctx && ctx->mem && ctx->mem->is_mem(fd)) {
-    Slate::MemFs::Handle *h = ctx->mem->get(fd);
-    if (!h) return 1;
-    if (is_read) {
-      if (rn < 4) return 1;
-      uint32_t chunk = (uint32_t)rest[0] | ((uint32_t)rest[1] << 8) | ((uint32_t)rest[2] << 16) | ((uint32_t)rest[3] << 24);
-      if (chunk == 0 || chunk > (1u << 30)) return 1;
-      std::vector<uint8_t> b = ctx->mem->read(h, chunk);
-      uint8_t *o = (uint8_t *)std::malloc(b.size() ? b.size() : 1); if (!o) return 1;
-      if (!b.empty()) std::memcpy(o, b.data(), b.size());
-      *out = o; *outn = b.size(); return 0;
-    }
-    if (is_write) {
-      if (nops < 2) return 1;
-      uint64_t n = ops[1].n; std::vector<uint8_t> tmp((size_t)n);
-      for (uint64_t i = 0; i < n; i++) tmp[i] = sl_opbyte(&ops[1], i);
-      int64_t wr = ctx->mem->write(h, tmp.data(), n);           /* -1 = past the tmpfs cap or an overflow: refuse */
-      if (wr < 0) return 1;
-      return ret8(wr);
-    }
-    if (is_close) { ctx->mem->close(fd); return ret8(0); }   /* free the slot for reuse */
-    return 1;                                                   /* accept on a ram file is nonsense */
-  }
-
   /* host-fd isolation: a read/write/close/accept may only touch an fd this container opened. A fabricated or
    * cross-container fd number is refused, so co-tenant containers in one process can't reach each other's fds. */
-  if (ctx && ctx->mem && !ctx->mem->owned_fds.count((int)fd)) return 1;
+  if (ctx && ctx->fds && !ctx->fds->owned_fds.count((int)fd)) return 1;
 
   /* the cancel gate is asked once, at the effect boundary, before a blocking verb — and then the verb runs and
    * the wire holds it. Nothing here waits on a timer to ask again. No gate installed: the verb runs. */
@@ -115,9 +89,9 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
   }
   if (is_close) {
     ::close((int)fd);
-    if (ctx && ctx->mem) {                                       /* release the fd-cap slot and drop ownership */
-      if (ctx->mem->open_host_fds > 0) ctx->mem->open_host_fds--;
-      ctx->mem->owned_fds.erase((int)fd);
+    if (ctx && ctx->fds) {                                       /* release the fd-cap slot and drop ownership */
+      if (ctx->fds->open_host_fds > 0) ctx->fds->open_host_fds--;
+      ctx->fds->owned_fds.erase((int)fd);
     }
     return ret8(0);
   }
@@ -125,10 +99,10 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
     if (gate()) return 1;                                      /* cancelled at the boundary */
     int c = ::accept((int)fd, nullptr, nullptr);               /* the wire holds it until a client comes */
     if (c < 0) return 1;
-    if (ctx && ctx->mem) {                                     /* the accepted client fd counts against the cap + is owned */
-      if (ctx->mem->open_host_fds >= ctx->mem->host_fd_cap) { ::close(c); return 1; }
-      ctx->mem->open_host_fds++;
-      ctx->mem->owned_fds.insert(c);
+    if (ctx && ctx->fds) {                                     /* the accepted client fd counts against the cap + is owned */
+      if (ctx->fds->open_host_fds >= ctx->fds->host_fd_cap) { ::close(c); return 1; }
+      ctx->fds->open_host_fds++;
+      ctx->fds->owned_fds.insert(c);
     }
     return ret8((int64_t)c);
   }
@@ -142,7 +116,7 @@ struct SlateDag {
   bool want_device;   /* the scope's device-executor choice; run() opens a DeviceScope so dispatch routes to it */
   Slate::EffectHost effect_host;   /* the OS-effect vtable; env().effect_host points here once installed */
   Slate::IoPolicy io_policy;       /* the compose grant (mounts/ports); env().io_policy points here, filled by setters */
-  Slate::MemFs    memfs;           /* the per-container ram store backing tmpfs; env().memfs points here — scoped */
+  Slate::FdTable  fds;             /* the container's table of the host fds it holds; env().fds points here — scoped */
   Slate::ProviderRegistry providers;  /* this container's own scheme->provider table; env().providers points here */
   std::vector<uint8_t> tail_prog_buf;   /* the tail-continuation slot: "slate.tail" writes the next program's word here */
   bool tail_flag_buf = false;           /* set when a tail hand-off was recorded; the run trampoline reads it */
@@ -158,7 +132,7 @@ struct SlateDag {
        empty (fail-closed: every open refuses until a compose spec grants a mount or a port). */
     Slate::install_io_providers(providers);   /* bind the available ways into this container's own registry, not a global */
     arena.env().io_policy = &io_policy;
-    arena.env().memfs = &memfs;
+    arena.env().fds = &fds;
     arena.env().providers = &providers;
     arena.env().io_stream = reinterpret_cast<decltype(arena.env().io_stream)>(&builtin_io_stream);
   }
@@ -375,12 +349,6 @@ extern "C" const char *slate_dag_mount(SlateDag *b, const char *prefix, const ch
 extern "C" const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int listen) {
   if (!b) return "args";
   return Slate::grant_expose(b->arena.env(), host ? host : "", port, listen != 0) ? nullptr : "args";
-}
-/* Compose grant — a tmpfs mount (Docker's --tmpfs): `prefix` is ram-backed, its files living in this container's
- * scoped MemFs (never a host path, never a process global). `writable` 0 makes it read-only. */
-extern "C" const char *slate_dag_tmpfs(SlateDag *b, const char *prefix, int writable) {
-  if (!b || !prefix) return "args";
-  return Slate::grant_tmpfs(b->arena.env(), prefix, writable != 0) ? nullptr : "args";
 }
 /* Install the deadline/cancel gate: `proceed(user)` is called at each effect boundary; returning 0 aborts the
  * effect (a clean refusal, not a crash). This is how a wall-clock deadline, a cpu/effect budget, or a cancel of a
@@ -663,7 +631,7 @@ extern "C" int32_t slate_dag_asr(SlateDag *b, int32_t x, int32_t sh) try {
  * the next program's name through this container's store and run what it names in a fresh arena that shares this
  * container (grant / fds / providers), and loop. Each hand-off is a finite dispatch, so a cycle of finite programs
  * (a service) is a chain of finite dispatches — no native stack, no growing graph, the container (e.g. a listening
- * fd) carried across. A program is a leaf: the slot holds its word, the store holds its byte cells, and a
+ * fd) carried across. A program is a leaf: the slot holds its word, the store holds its cells, and a
  * fleet of ticks all read one program with nothing shipped between them. A word the store does not hold — or
  * one whose leaf is not whole yet — ends the service with a refusal, never a wrong tick. The tick writes its own hand-off back to this
  * container's tail slot, which this loop reads; a tick that hands off to nothing ends the trampoline. The result
@@ -743,7 +711,7 @@ static bool run_dims(SlateDag *b, bool recall, const int64_t *dims, uint32_t ndi
 }
 
 /* Keep the construction rooted at `root` as a leaf, and name it: the graph's bytes through the same door as any
- * bytes handed in — one cell per byte under the word of (the lens in the clear ‖ the bytes), exactly as the emit
+ * bytes handed in — one cell per piece under the word of (the lens in the clear ‖ the bytes), exactly as the emit
  * door keeps one — and that word set as this container's program. A machine that takes this
  * container's ask then has a name for the construction and needs none of its bytes: with a roster the leaf is
  * sliced across the carrying machines by the door in front of the store, and gathered whole by anyone who asks
@@ -818,7 +786,7 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
  * every word it ever named unchanged.
  *
  * The ask itself travels the same way: these bytes are kept as a leaf on the roster lens, exactly as the
- * construction is (leaf_put, one cell per byte under the word of the lens in the clear ‖ the bytes), and what
+ * construction is (leaf_put, one cell per piece under the word of the lens in the clear ‖ the bytes), and what
  * is handed back is the ask's word. The bytes never cross a door — an Interest for an ask's word is the one
  * packet that says "run this". ---- */
 static void ask_put_u32(std::vector<uint8_t> &b, uint32_t v) {
@@ -852,7 +820,7 @@ extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try 
   for (int64_t d : b->dims_buf) ask_put_u64(a, (uint64_t)d);
   ask_put_u64(a, (uint64_t)wn);
   a.insert(a.end(), w, w + wn);
-  /* the ask goes through the door like every other bytes handed in: one cell per byte, under the word of the
+  /* the ask goes through the door like every other bytes handed in: one cell per piece, under the word of the
      lens in the clear ‖ the bytes, on the roster lens when this container carries a share of one. The word is
      all that leaves — an Interest for it is "run this ask". A store that kept nothing refuses. */
   const Slate::Word key = b->arena.leaf_key(a.data(), a.size());
@@ -1022,7 +990,7 @@ extern "C" const char *slate_array_receipt(const SlateArray *a, const slate_entr
    refuses by name. INT64_MIN = -2^63: its magnitude sits at the wide-value ceiling and has no positive int64
    form, yet the signed output holds it — so it is handed back directly (never -(int64_t)2^63, which is
    undefined). Anything wider refuses rather than reading a wrong value. Every door that pulls an int64 out of
-   a reading (the array door, the search door) comes here. */
+   a reading (the array door) comes here. */
 static const char *reading_i64(const Slate::Receipt &r, int64_t *num, int64_t *den) {
   if (!r.has_value()) return "refused";
   const uint64_t TOP = (uint64_t)1 << 63;
@@ -1090,7 +1058,7 @@ extern "C" void slate_array_free(SlateArray *a) {
  * Fragment libraries: a fragment is a serialized DAG piece with typed holes, kept as a leaf. save_fragment
  * records the sub-DAG rooted at a node as normalized builder instructions (the portable source form — never
  * lowered nodes) plus a carrier table (a hole carries only a receipt; a baked constant carries its int64
- * cells) and a crc, keeps those bytes as byte cells under their own word, and hands back that word — the
+ * cells) and a crc, keeps those bytes as cells under their own word, and hands back that word — the
  * whole name; load walks that leaf back, cell 0, cell 1, … to the first cell nobody has, and validates it
  * fully before the fragment is usable; splice replays it into another builder, so node ids remap and receipts
  * compose at the seam (receipt-in / receipt-out). There is no file and no stream, and nothing outside the
@@ -1386,7 +1354,7 @@ extern "C" const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const 
   put32(frag_crc32(buf.data(), buf.size()));
 
   /* The construction, written out, is a leaf: it goes through the same door as any bytes handed in and lands as
-     byte cells under the word of (the lens in the clear ‖ the bytes). A leaf already there is a hit and is not
+     cells under the word of (the lens in the clear ‖ the bytes). A leaf already there is a hit and is not
      put again. With a roster the door in front of the store slices it across the carrying machines, so anyone
      who asks for the word gathers it whole by walking the cells. Nothing says how many there are: the records
      are the count. A store that kept nothing refuses — a program nobody can read is not a program. */
@@ -1725,75 +1693,6 @@ extern "C" SlateArray *slate_invoke(SlateDag *b, const uint8_t *word, uint64_t w
   int64_t one = 1;
   return slate_dag_run(b, root, dims ? dims : &one, dims ? ndims : 1);
 } catch (...) { return nullptr; }
-
-/* The S axis over the C ABI, unified: one door does measurement (by shape) or value computation, selected by
- * `operation`.
- *   • operation < 0  → measurement: walk from `root` and collect the nodes whose carried shape {P, Λ} equals
- *     the target {potential, mode}. Matching is by the shape the builder already composed onto each node
- *     (DagBuild::search #1), never a value — a structural/relatedness query, decidable and cheap (O(1) per
- *     vertex, budgeted, resumable). No value is computed: out_num/out_den/out_undef stay at their defaults (0/1/0).
- *   • operation >= 0 → value: run the value search (DagBuild::search #2) over the collection rooted at
- *     `root`, where `operation` is a node whose Λ steers: a `sub`-built op (decompose) locates the element
- *     equal to `target` (a lit node); an `add`-built op (compose) aggregates the exact fold (pass target =
- *     lit(0)). Matched leaf ids go to out/out_count; the settled value (the located element, or the aggregate)
- *     is decoded into *out_num / *out_den. An undefined/refused value sets *out_undef=1; a value past int64
- *     returns "wide" rather than a wrong answer (mirrors the slate_array_i64_unsafe wide path). Fail-closed:
- *     a null/poisoned builder or an out-of-range root/target/operation refuses to "args".
- * Any output pointer may be NULL. */
-extern "C" const char *slate_dag_search(SlateDag *b, int32_t root, uint64_t potential, const char *mode, uint64_t budget,
-                                int32_t *out, uint32_t cap, uint32_t *out_count, uint64_t *out_visited,
-                                int32_t *out_resumable, int32_t target, const char *extremum, int32_t operation,
-                                int64_t *out_num, int64_t *out_den, int32_t *out_undef) try {
-  if (out_count) *out_count = 0;
-  if (out_visited) *out_visited = 0;
-  if (out_resumable) *out_resumable = 0;
-  if (out_num) *out_num = 0;
-  if (out_den) *out_den = 1;
-  if (out_undef) *out_undef = 0;
-  if (!sd_node_ok(b, root)) return "args";
-  const bool decompose = mode && std::strcmp(mode, "decompose") == 0;
-  if (mode && !decompose && std::strcmp(mode, "compose") != 0) return "args";
-  const bool ex_min = extremum && std::strcmp(extremum, "min") == 0, ex_max = extremum && std::strcmp(extremum, "max") == 0;
-  if (extremum && !ex_min && !ex_max) return "args";
-
-  if (operation < 0) {                                 /* measurement: by shape {P, Λ} — the current behavior */
-    Slate::Shape shp{potential, decompose ? Slate::Receipt::Mode::Decompose
-                                          : Slate::Receipt::Mode::Compose};
-    Slate::Search r = b->build.search(root, shp, budget);
-    if (out_visited) *out_visited = r.visited;
-    if (out_resumable) *out_resumable = r.resumable ? 1 : 0;
-    if (out_count) *out_count = (uint32_t)r.at.size();
-    if (out && cap) {
-      uint32_t n = (uint32_t)r.at.size() < cap ? (uint32_t)r.at.size() : cap;
-      for (uint32_t i = 0; i < n; i++) out[i] = r.at[i];
-    }
-    return nullptr;
-  }
-
-  /* value: by computation. Guard target/operation node ids too (overload #2 also guards internally, but refuse
-     early and uniformly here). `target` names the value sought (a lit node); `operation` steers by Λ. The two
-     extremum names a direction, not a node — the extremal measurement (kSearchMin/kSearchMax in the builder). */
-  const bool extremal = ex_min || ex_max;
-  if (extremal) target = ex_max ? Slate::kSearchMax : Slate::kSearchMin;
-  if ((!extremal && !sd_node_ok(b, target)) || !sd_node_ok(b, operation)) return "args";
-  Slate::Search r = b->build.search(root, target, operation, budget);
-  if (out_visited) *out_visited = r.visited;
-  if (out_resumable) *out_resumable = r.resumable ? 1 : 0;
-  if (out_count) *out_count = (uint32_t)r.at.size();
-  if (out && cap) {
-    uint32_t n = (uint32_t)r.at.size() < cap ? (uint32_t)r.at.size() : cap;
-    for (uint32_t i = 0; i < n; i++) out[i] = r.at[i];
-  }
-  /* Decode the settled value → num/den through the one int64 readback: a refused/undefined fold sets
-     *out_undef=1 (OK, no value); a value past int64 returns EWIDE (never a wrong answer). */
-  Slate::Receipt rd = r.value.to_reading();
-  if (!rd.has_value()) { if (out_undef) *out_undef = 1; return nullptr; }
-  int64_t vn = 0, vd = 1;
-  if (const char *e = reading_i64(rd, &vn, &vd)) return e;
-  if (out_num) *out_num = vn;
-  if (out_den) *out_den = vd;
-  return nullptr;
-} catch (...) { return "internal"; }
 
 /* ---- the self-hosting seam: emit / run as engine-internal effect handlers --------------------------------
  * Installed on every builder's Envelope (SlateDag ctor). effect/eval.hpp resolves the reserved classes

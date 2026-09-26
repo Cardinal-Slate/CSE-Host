@@ -1,6 +1,6 @@
 /* The fragment-library door from pure C (slate/slate.h). No C++ in this translation unit. Builds a fragment
  * with one hole (A) and one baked constant carrier (C), computing root[i] = A[i]*2 + C[i] over grid[i]; keeps
- * it as a leaf through the store (one cell per byte, under its own word), walks it back by that word — cell 0,
+ * it as a leaf through the store (one cell per piece, under its own word), walks it back by that word — cell 0,
  * cell 1, … to the first cell nobody has, because nothing anywhere says how many there are — checks the
  * interface, splices it into two fresh builders with different A data, runs, and verifies the exact cells.
  * Then it exercises robustness (an unkept word, an empty word, a store that hands back a different byte, a
@@ -88,7 +88,7 @@ int main(void) {
   /* 1. round-trip + splice + run */
   Prog frag = build_and_save();
   CHECK(frag.wn > 0, "fragment kept as a leaf, named by its word and nothing else");
-  CHECK(store.rows > 0 && store.rows == ms_leaf_len(&store), "the leaf is one row per byte, and that is its length");
+  CHECK(store.rows > 0 && store.rows == ms_leaf_cells(&store), "the leaf is one row per piece, and the walk finds every one");
 
   /* 2. iface */
   {
@@ -156,7 +156,7 @@ int main(void) {
     uint32_t hs[1] = {ca};
     CHECK(slate_dag_save_fragment(kb, rt, hs, 1, &one.w, &one.wn) == NULL, "leaf kept in its own table");
     slate_dag_free(kb);
-    CHECK(only.rows > 0 && only.rows == ms_leaf_len(&only), "the table holds exactly one row per program byte");
+    CHECK(only.rows > 0 && only.rows == ms_leaf_cells(&only), "the table holds exactly one row per program piece");
     int flipped = 0;                               /* every row here is a cell of that leaf: flip one residue */
     for (size_t i = 0; i < only.nbuckets && !flipped; i++)
       for (MsRow *r = only.tab[i]; r; r = r->next)
@@ -187,18 +187,18 @@ int main(void) {
     uint32_t hs[1] = {ca};
     CHECK(slate_dag_save_fragment(kb, rt, hs, 1, &one.w, &one.wn) == NULL, "leaf kept for the lost-cell walk");
     slate_dag_free(kb);
-    const size_t len = ms_leaf_len(&lost);
+    const size_t len = ms_leaf_cells(&lost);
     CHECK(len > 0, "the lost-cell walk has a leaf to shorten");
     int ran = 0;
     for (size_t stop = 0; stop < len; stop++) {          /* the walk stops after `stop` cells */
-      ms_leaf_stop_after(&lost, stop);
+      ms_leaf_stop_cells(&lost, stop);
       SlateDag *sb = slate_dag_new(); MS_INSTALL(sb, &lost);
       SlateFrag *sf = slate_frag_load(sb, one.w, one.wn);
       if (sf) { ran++; slate_frag_free(sf); }
       slate_dag_free(sb);
     }
     CHECK(ran == 0, "a walk that stopped early was never parsed into a fragment");
-    ms_leaf_stop_after(&lost, len);                      /* every cell back: the whole leaf loads again */
+    ms_leaf_stop_cells(&lost, len);                      /* every cell back: the whole leaf loads again */
     {
       SlateDag *sb = slate_dag_new(); MS_INSTALL(sb, &lost);
       SlateFrag *sf = slate_frag_load(sb, one.w, one.wn);

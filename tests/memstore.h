@@ -3,7 +3,7 @@
  *
  * The three callbacks slate_dag_codec takes, over one table of (word -> bytes) rows: `ms_get` is the decode
  * (the word goes out, the row comes back, or a miss), `ms_put` is the put. Encode is left to the engine's own.
- * Rows are keyed by the whole word, hashed, so a test that keeps a program — a leaf of one row per byte —
+ * Rows are keyed by the whole word, hashed, so a test that keeps a program — a leaf of one row per piece —
  * stays linear rather than rescanning a list per cell.
  *
  * This is a test's store, not a cache in the engine: the engine holds nothing between calls, and every row a
@@ -12,6 +12,7 @@
 #ifndef SLATE_TESTS_MEMSTORE_H
 #define SLATE_TESTS_MEMSTORE_H
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +38,7 @@ static MsRow *ms_find(MemStore *s, const uint8_t *w, uint64_t wn) {
     if (r->wn == wn && memcmp(r->w, w, (size_t)wn) == 0) return r->hidden ? NULL : r;
   return NULL;
 }
-static int ms_get(const uint8_t *w, uint64_t wn, const uint8_t *sec, uint64_t sn,
+static int ms_get_(const uint8_t *w, uint64_t wn, const uint8_t *sec, uint64_t sn,
                   uint8_t **out, uint64_t *outn, void *user) {
   (void)sec; (void)sn;
   MemStore *s = (MemStore *)user;
@@ -50,7 +51,7 @@ static int ms_get(const uint8_t *w, uint64_t wn, const uint8_t *sec, uint64_t sn
   *outn = r->n;
   return 0;
 }
-static int ms_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n,
+static int ms_put_(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n,
                   const uint8_t *sec, uint64_t sn, void *user) {
   (void)sec; (void)sn;
   MemStore *s = (MemStore *)user;
@@ -65,8 +66,17 @@ static int ms_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n,
   size_t h = (size_t)(ms_hash(w, wn) % s->nbuckets);
   r->next = s->tab[h]; s->tab[h] = r; s->rows++;
   if (s->nseq == s->seqcap) { s->seqcap = s->seqcap ? s->seqcap * 2 : 1024; s->seq = (MsRow **)realloc(s->seq, s->seqcap * sizeof(MsRow *)); }
-  s->seq[s->nseq++] = r;                              /* put order: a leaf's cells, cell 0 first */
+  s->seq[s->nseq++] = r;                              /* put order: a leaf's cells, cell 0 first (a leaf this small
+                                                         is kept on one thread) */
   return 0;
+}
+/* the engine calls a store from several threads at once: one lock around the table */
+static pthread_mutex_t ms_mu = PTHREAD_MUTEX_INITIALIZER;
+static int ms_get(const uint8_t *w, uint64_t wn, const uint8_t *s, uint64_t sn, uint8_t **out, uint64_t *outn, void *u) {
+  pthread_mutex_lock(&ms_mu); const int rc = ms_get_(w, wn, s, sn, out, outn, u); pthread_mutex_unlock(&ms_mu); return rc;
+}
+static int ms_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n, const uint8_t *s, uint64_t sn, void *u) {
+  pthread_mutex_lock(&ms_mu); const int rc = ms_put_(w, wn, b, n, s, sn, u); pthread_mutex_unlock(&ms_mu); return rc;
 }
 static void ms_free(MemStore *s) {
   for (size_t i = 0; s->tab && i < s->nbuckets; i++)
@@ -75,53 +85,56 @@ static void ms_free(MemStore *s) {
   memset(s, 0, sizeof *s);
 }
 
-/* ---- a byte cell, as a row --------------------------------------------------------------------------------
+/* ---- a leaf's cells, as rows ------------------------------------------------------------------------------
  *
- * A leaf's cell is an ordinary row: [sign u8][num residue u32]*m [den residue u32]*m. `bytes_buffer` lays a
- * byte at width 1, so a byte over 127 is kept as its signed form: the sign byte is set and the magnitude is
- * 256 - v. Every prime of any lens is far larger than 256, so each residue of such a magnitude is just the
- * magnitude — which is why a test can read a cell's byte off its row, and write one into it, without knowing
- * a single prime. This is how a store lies to a load: it is the only thing that can, now that no file carries
- * the bytes. */
-static int ms_cell_byte(const MsRow *r) {
-  if (!r || r->n < 9 || (r->n - 1) % 8) return -1;
-  uint32_t mag = 0; memcpy(&mag, r->b + 1, 4);
-  if (r->b[0]) return (mag && mag <= 128) ? (int)(256u - mag) : -1;
-  return mag <= 127 ? (int)mag : -1;
+ * A leaf's cell is an ordinary row holding one piece of its bytes (tests/leaf_cells.h reads and writes one the
+ * way the engine lays it). In a table that holds one leaf and nothing else, the rows in put order are that
+ * leaf's cells, cell 0 first. This is how a store lies to a load: it is the only thing that can, now that no
+ * file carries the bytes. */
+#include "leaf_cells.h"
+/* How many cells a walk over this table's leaf finds: the rows in put order, while each is a piece nobody has
+   hidden. Nothing recorded it. */
+static size_t ms_leaf_cells(const MemStore *s) {
+  size_t n = 0; uint8_t p[16];
+  while (n < s->nseq && !s->seq[n]->hidden && lc_cell_piece(s->seq[n]->b, s->seq[n]->n, p) >= 0) n++;
+  return n;
 }
-static void ms_cell_set(MsRow *r, unsigned char v) {
-  if (!r || r->n < 9 || (r->n - 1) % 8) return;
-  const uint32_t m = (uint32_t)((r->n - 1) / 8);
-  const int neg = v >= 128;
-  const uint32_t mag = neg ? (uint32_t)(256 - (int)v) : (uint32_t)v, one = 1;
-  r->b[0] = (uint8_t)(neg ? 1 : 0);
-  for (uint32_t j = 0; j < m; j++) { memcpy(r->b + 1 + 4 * j, &mag, 4); memcpy(r->b + 1 + 4 * (m + j), &one, 4); }
+/* How many bytes those cells hold: the leaf's length, as a walk reads it. */
+static size_t ms_leaf_len(const MemStore *s) {
+  size_t n = 0, c = ms_leaf_cells(s); uint8_t p[16];
+  for (size_t i = 0; i < c; i++) n += (size_t)lc_cell_piece(s->seq[i]->b, s->seq[i]->n, p);
+  return n;
 }
-/* The first `n` byte cells of this table, as bytes. 0 when a cell is not a byte cell. */
+/* The first `n` bytes of this table's leaf. 0 when its cells do not hold that many. */
 static int ms_leaf_read(const MemStore *s, size_t n, unsigned char *out) {
-  if (s->nseq < n) return 0;
-  for (size_t i = 0; i < n; i++) { int v = ms_cell_byte(s->seq[i]); if (v < 0) return 0; out[i] = (unsigned char)v; }
-  return 1;
+  size_t got = 0, c = ms_leaf_cells(s); uint8_t p[16];
+  for (size_t i = 0; i < c && got < n; i++) {
+    const int v = lc_cell_piece(s->seq[i]->b, s->seq[i]->n, p);
+    const size_t take = (size_t)v < n - got ? (size_t)v : n - got;
+    memcpy(out + got, p, take); got += take;
+  }
+  return got == n;
 }
-/* Make the first `n` byte cells of this table hold these bytes — a store that hands back something else. */
-static void ms_leaf_write(MemStore *s, const unsigned char *in, size_t n) {
-  for (size_t i = 0; i < n && i < s->nseq; i++) ms_cell_set(s->seq[i], in[i]);
+/* Make this table's leaf hold these bytes — a store that hands back something else: cell i holds the i-th piece,
+   on the row it already is. 0 when the table has too few cells for them. */
+static int ms_leaf_write(MemStore *s, const unsigned char *in, size_t n) {
+  const size_t cells = (n + LC_PIECE - 1) / LC_PIECE;
+  if (cells > s->nseq) return 0;
+  for (size_t i = 0; i < cells; i++) {
+    const size_t lo = i * LC_PIECE, w = n - lo < LC_PIECE ? n - lo : LC_PIECE;
+    lc_cell_make(in + lo, (int)w, s->seq[i]->b, s->seq[i]->n);
+  }
+  return 1;
 }
 /* Make a walk over this table's leaf stop after `n` cells: every later cell becomes one nobody has. A hidden
    row is still in the table; `ms_find` simply does not answer with it, which is exactly a miss. This is the
    only thing that can shorten a leaf now, because nothing anywhere records how long one is — the records are
    the count. Call with a large `n` to put every cell back. */
-static void ms_leaf_stop_after(MemStore *s, size_t n) {
+static void ms_leaf_stop_cells(MemStore *s, size_t n) {
   for (size_t i = 0; i < s->nseq; i++) s->seq[i]->hidden = (i >= n);
 }
-/* How many bytes the leaf in this table holds: what a walk finds — the rows in put order, while each is a byte
-   cell nobody has hidden. In a table that holds one leaf and nothing else, that is that leaf's length. Nothing
-   recorded it. */
-static size_t ms_leaf_len(const MemStore *s) {
-  size_t n = 0;
-  while (n < s->nseq && !s->seq[n]->hidden && ms_cell_byte(s->seq[n]) >= 0) n++;
-  return n;
-}
+/* The same, said in bytes: keep the cells that hold the first `n` bytes. */
+static void ms_leaf_stop_after(MemStore *s, size_t n) { ms_leaf_stop_cells(s, (n + LC_PIECE - 1) / LC_PIECE); }
 /* Hand a builder this table as its store. Encode is the engine's own (a hash of the bytes). */
 #define MS_INSTALL(b, s) slate_dag_codec((b), NULL, ms_get, ms_put, NULL, 0, (s))
 

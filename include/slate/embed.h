@@ -1,7 +1,7 @@
 /// @file embed.h
 /// @brief The C ABI, embedder band: what a host that runs .slate programs installs around the record — effect
 ///        capabilities and hosts, the sandbox (mounts, endpoints, the deadline gate), the broker's consume
-///        cursor, fiber concurrency, and the graph search. Extends slate/slate.h; a user who only builds and
+///        cursor, and fiber concurrency. Extends slate/slate.h; a user who only builds and
 ///        reads records never needs it.
 ///
 /// SPDX-License-Identifier: MIT OR Apache-2.0
@@ -41,9 +41,6 @@ const char *slate_dag_effect_caps(SlateDag *b, const char *const *classes, uint3
 /// which of them may reach what.
 const char *slate_dag_mount(SlateDag *b, const char *prefix, const char *real, int writable);
 
-/// Compose grant — a tmpfs mount (Docker's --tmpfs). `prefix` is ram-backed: its files live in this container's
-/// scoped store (no host path, no process global), gone when the builder is freed. `writable` 0 = read-only.
-const char *slate_dag_tmpfs(SlateDag *b, const char *prefix, int writable);
 
 /// Compose grant — expose an endpoint (Docker's -p). Permit the tcp/udp/unix provider to reach `host`:`port`;
 /// `host` null or "" matches any host at that port. `listen` 0 permits a connect (client); nonzero permits a
@@ -62,8 +59,8 @@ const char *slate_dag_expose(SlateDag *b, const char *host, uint16_t port, int l
  *          never in a word. Re-dividing a roster therefore renames nothing.
  * ask      the bytes that let any machine run the same construction on its own share — itself a leaf, kept
  *          through the door and named by its word (slate_dag_ask); a read for that word is "run it".
- * leaf     bytes handed in, or a construction written out: one cell per byte under its own word, on the whole
- *          lens that word carries, the same shape as every other row. A program is a leaf — never a file,
+ * leaf     bytes handed in, or a construction written out: one cell per piece (as wide as the height) under
+ *          its own word, on the lens that word implies, the same shape as every other row. A program is a leaf — never a file,
  *          never bytes inside an ask.
  * walk     how a leaf is read back: word ‖ 0, word ‖ 1, … to the first cell nobody has. Nothing says how many
  *          there are — the records are the count.
@@ -116,8 +113,8 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
  * carrying machines and the taker walks it back through the same door it reads any other row through. Which
  * share the taker carries is the taker's own primes, handed to slate_dag_take_ask beside the ask.
  *
- * The ask travels the same way as everything else: its bytes are kept as a leaf — one cell per byte, on the
- * roster lens, under the word of (the lens in the clear ‖ the bytes) — and what the door hands back is that
+ * The ask travels the same way as everything else: its bytes are kept as a leaf — one cell per piece, on the
+ * lens its word implies, under the word of (the lens in the clear ‖ the bytes) — and what the door hands back is that
  * word. The bytes never cross a door. So there are two packets and no third: the cells under a word, and a
  * row under a word. A read for an ask's word is the one thing that says "run this" (slate_dag_run_ask).
  *
@@ -136,7 +133,7 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
  * field against the ask's end and refuses a short or malformed ask rather than guessing at the bytes. */
 
 /// Keep this container's run context as an ask and hand back the ask's word. The bytes go through the door as
-/// a leaf (one cell per byte, on the roster lens when this container carries a share of one — nothing is ever
+/// a leaf (one cell per piece, on the lens its word implies — nothing is ever
 /// kept under the bare word itself); *word/*wn is a malloc'd copy of the word, which the caller frees with
 /// free(). The dims are the last dispatch's (slate_dag_run or slate_dag_start); a container that has not run
 /// carries none, and the ask says ndims 0. A container that names no program asks with wn 0. Two containers
@@ -145,8 +142,8 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
 int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn);
 
 /// Keep `bytes` as a leaf and hand back the leaf's word: the same door the ask and a fragment go through — one
-/// cell per byte (sign, A = the byte, B = 1) under word ‖ 0, word ‖ 1, …, on the roster lens when this container
-/// carries a share of one, sliced across the carriers by the codec it was given. The word is the lens in the clear
+/// cell per piece as wide as the height (sign, A = the piece, B = 1) under word ‖ 0, word ‖ 1, …, on the lens the
+/// word implies, sliced across the carriers by the codec it was given. The word is the lens in the clear
 /// ‖ the bytes, named by that codec. Nothing is kept under the bare word, and no byte is ever kept raw. A leaf
 /// already kept is a hit and is not put again. *word/*wn is a malloc'd copy, freed by the caller with free().
 /// @return 0; nonzero on a null argument, no bytes, a store that kept nothing, or a buffer that could not be
@@ -202,7 +199,7 @@ const char *slate_array_cell_word(const SlateArray *a, uint64_t i, uint8_t **out
 /// same way, until a tick hands off to nothing. `n` 0 clears it.
 ///
 /// A container that carries a roster sets this itself if nothing else has: at the first slate_dag_run with a
-/// roster set and no program, the construction being run is kept as a leaf (its bytes, one cell per byte, under
+/// roster set and no program, the construction being run is kept as a leaf (its bytes, one cell per piece, under
 /// their own word) and that word becomes the program — so the ask this container hands another machine names
 /// the construction rather than carrying it. A construction that cannot be saved as a fragment (an RNS/ℚ, f32
 /// or wide carrier is not fragment-addressable — see slate_dag_save_fragment), or one no store would keep, is
@@ -301,36 +298,6 @@ void slate_scope_spawn(SlateScope *scope, void (*task)(void *user), void *user);
 /// The host's async-effect completion callback: call from any thread when a slate_dag_effect_host `begin` op
 /// finishes, passing the `slot` begin received and the `n` result bytes. Wakes the parked consumer.
 void slate_effect_complete(void *slot, const uint8_t *data, uint64_t n);
-
-/* ---- search: the S axis over a graph — one door, measurement (by shape) or value (by computation) ---- */
-
-/// The unified search over the graph rooted at `root`. `operation` selects which of the two searches runs:
-///
-///   • operation < 0  → measurement (by shape). Find every node reachable from `root` (walking its operands)
-///     whose carried shape matches the target {potential P, mode Λ}. A structural relatedness query: it matches
-///     on the shape the builder already composed onto each node — not on value, not on node id. `potential` is
-///     the height bound P (a node's `h_bits`); `mode` is Λ by name, "compose" or "decompose" (NULL = compose).
-///     No value is computed: `out_num`/`out_den`/`out_undef` stay at defaults.
-///
-///   • operation >= 0 → value (by computation). Run the value search over the collection (a plain op(left,right)
-///     composition, elements at the leaves in monotone order). `operation` is a node whose Λ steers, read off
-///     the graph: a `sub`-built op (decompose) locates the element equal to `target` (the certified sign of
-///     target−element bisects the tree in place, sub-linear); an `add`-built op (compose) aggregates the exact
-///     fold of every element (pass `target` = a lit(0) node). `target` names the value sought (a lit node),
-///     unless `extremum` is "min" or "max": then the decompose descends to the collection's own least / greatest
-///     element (sub-linear); NULL = by `target`. The settled value is decoded into `*out_num`/`*out_den`; a
-///     refused/undefined value sets `*out_undef=1` (with NULL); a value past int64 returns "wide".
-///
-/// In both modes: matched node ids are written to `out[0 .. min(*out_count, cap))`; `*out_count` receives the
-/// TOTAL match count, which may exceed `cap` — re-call with a larger `out` to read them all. `*out_visited`
-/// receives the number of vertices walked; `*out_resumable` is 1 if `budget` (0 = unbounded) cut the walk
-/// before it finished. Pass NULL for any out you do not want.
-/// @return NULL; "wide" if a by-value result exceeds int64; "args" on a null/poisoned builder or an out-of-range
-///         `root` (or, for a by-value query, `target`/`operation`), or a `mode`/`extremum` not listed above.
-const char *slate_dag_search(SlateDag *b, int32_t root, uint64_t potential, const char *mode, uint64_t budget,
-                     int32_t *out, uint32_t cap, uint32_t *out_count, uint64_t *out_visited,
-                     int32_t *out_resumable, int32_t target, const char *extremum, int32_t operation,
-                     int64_t *out_num, int64_t *out_den, int32_t *out_undef);
 
 #ifdef __cplusplus
 }

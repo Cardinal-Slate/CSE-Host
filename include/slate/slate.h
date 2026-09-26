@@ -81,7 +81,8 @@ const char *slate_dag_potential(SlateDag *b, uint32_t bits);
 /// for a callback not offered: encode defaults to a generic hash of the bytes keyed by the secret. The store is
 /// the only memory: everything the region computes — readings, compiled programs, effects, residue promotions,
 /// the relations the lane keeps — is looked up by its word before it runs and put after. With no decode
-/// installed nothing is kept and every ask runs. The region's tasks inherit it.
+/// installed nothing is kept and every ask runs. The region's tasks inherit it. The three are called from several
+/// threads at once — a large leaf's pieces are kept and read side by side — so a store behind them takes its own lock.
 const char *slate_dag_codec(SlateDag *b,
     int (*encode)(const uint8_t *bytes, uint64_t n, const uint8_t *secret, uint64_t sn, uint8_t **out, uint64_t *outn, void *user),
     int (*decode)(const uint8_t *word, uint64_t wn, const uint8_t *secret, uint64_t sn, uint8_t **out, uint64_t *outn, void *user),
@@ -194,7 +195,7 @@ void slate_array_free(SlateArray *a);
  * A fragment is a construction with unbound carriers (holes) — a reusable graph piece, not a finished
  * computation. save_fragment records the sub-DAG rooted at a node as normalized builder instructions (the
  * portable source form, never lowered nodes — each host re-lowers in its own context) and keeps those bytes as
- * a leaf: one cell per byte, under their own word, through the same door as any bytes handed in. load walks
+ * a leaf: one cell per piece, under their own word, through the same door as any bytes handed in. load walks
  * that leaf back by its word and parses it; splice replays it into another builder, wiring the
  * caller's carriers into its holes and returning the new root node id. Receipts compose at the seam. Any
  * container whose store holds the leaf loads and splices it, so a construction travels as a name and never as
@@ -225,7 +226,7 @@ typedef struct {
 /// free(). That word is the whole name. Carriers referenced by `root` but not listed in `holes` are
 /// baked in as constants (their int64 cell values are serialized) — a baked carrier must be a plain positional
 /// integer array (an RNS/float carrier must be a hole). The bytes go through the region's store (slate_dag_codec)
-/// as one cell per byte; a leaf already kept under that word is a hit and is not put again. Nothing is written
+/// as one cell per piece; a leaf already kept under that word is a hit and is not put again. Nothing is written
 /// anywhere else: there is no sink and no file.
 /// @return NULL; "args" (null/poisoned builder, a null out, bad root, a hole id that is not a carrier `root`
 ///         reads, or a non-serializable baked carrier); "refused" (the store kept nothing — a program nobody

@@ -15,7 +15,7 @@ static int fails = 0;
 
 /* the store, outside the engine */
 typedef struct { uint8_t word[64]; uint64_t wn; uint8_t *bytes; uint64_t n; } Slot;
-/* An effect's answer is a leaf: one row per byte, under one word per cell. A handful of answers is a
+/* An effect's answer is a leaf: one row per piece, under one word per cell. A handful of answers is a
    few hundred rows, so the slots are sized for the walk, not for one row per answer. */
 #define MS_SLOTS 4096
 typedef struct { Slot s[MS_SLOTS]; int count; } Store;

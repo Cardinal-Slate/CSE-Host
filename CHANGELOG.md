@@ -2,6 +2,17 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.13.0
+
+`slate_dag_tmpfs` is removed from the C ABI (there is no ram filesystem: bytes a computation keeps are a leaf in the
+store), and the io stream no longer routes ram handles. `slate_dag_search` is removed from the C ABI with
+`DagBuild::search`: a value is found by asking its word, order is the sign of a difference, a fold is the graph run.
+
+A leaf handed in (`slate_dag_leaf`), an ask and a fragment are kept one cell per piece as wide as the height, on
+the lens the word implies. The C gates read and write a cell the way the engine lays it (`tests/leaf_cells.h`)
+instead of reading a byte off a residue. The codec's callbacks are called from several threads at once (a large leaf's
+pieces are kept and read side by side), which `slate_dag_codec` now says; the C gates' own stores take a lock. The io-by-word gate mounts a real directory.
+
 ## 0.12.0
 
 `slate_dag_leaf(b, bytes, n, &word, &wn)`: bytes handed in are kept as a leaf through the container's own door —

@@ -7,6 +7,7 @@
  * with no rows put; a fragment is the interchange unit — kept as a leaf, loaded back by name in another
  * container over the same store, spliced over new binaries, and invoked by name; a refusal is a name, never a
  * wrong value. */
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,20 +67,26 @@ static int reads(SlateDag *b, int32_t root, int sign, uint64_t num, uint64_t den
 /* ---- the caller's store: (word, bytes) rows behind the three callbacks, counting ---- */
 typedef struct { uint8_t *w; uint64_t wn; uint8_t *b; uint64_t n; } Row;
 typedef struct { Row *r; size_t n, cap; long gets, hits, puts; } Store;
+static pthread_mutex_t st_mu = PTHREAD_MUTEX_INITIALIZER;   /* the engine calls a store from several threads */
 static int st_get(const uint8_t *w, uint64_t wn, const uint8_t *s, uint64_t sn, uint8_t **out, uint64_t *outn, void *u) {
-  (void)s; (void)sn; Store *st = (Store *)u; st->gets++;
+  (void)s; (void)sn; Store *st = (Store *)u; int rc = 1;
+  pthread_mutex_lock(&st_mu); st->gets++;
   for (size_t i = 0; i < st->n; i++) if (st->r[i].wn == wn && memcmp(st->r[i].w, w, (size_t)wn) == 0) {
-    st->hits++; *out = (uint8_t *)malloc(st->r[i].n ? (size_t)st->r[i].n : 1); memcpy(*out, st->r[i].b, (size_t)st->r[i].n); *outn = st->r[i].n; return 0; }
-  return 1;
+    st->hits++; *out = (uint8_t *)malloc(st->r[i].n ? (size_t)st->r[i].n : 1); memcpy(*out, st->r[i].b, (size_t)st->r[i].n); *outn = st->r[i].n; rc = 0; break; }
+  pthread_mutex_unlock(&st_mu);
+  return rc;
 }
 static int st_put(const uint8_t *w, uint64_t wn, const uint8_t *b, uint64_t n, const uint8_t *s, uint64_t sn, void *u) {
-  (void)s; (void)sn; Store *st = (Store *)u; st->puts++;
+  (void)s; (void)sn; Store *st = (Store *)u;
+  pthread_mutex_lock(&st_mu); st->puts++;
   for (size_t i = 0; i < st->n; i++) if (st->r[i].wn == wn && memcmp(st->r[i].w, w, (size_t)wn) == 0) {
-    free(st->r[i].b); st->r[i].b = (uint8_t *)malloc(n ? (size_t)n : 1); memcpy(st->r[i].b, b, (size_t)n); st->r[i].n = n; return 0; }
+    free(st->r[i].b); st->r[i].b = (uint8_t *)malloc(n ? (size_t)n : 1); memcpy(st->r[i].b, b, (size_t)n); st->r[i].n = n;
+    pthread_mutex_unlock(&st_mu); return 0; }
   if (st->n == st->cap) { st->cap = st->cap ? st->cap * 2 : 64; st->r = (Row *)realloc(st->r, st->cap * sizeof(Row)); }
   Row *r = &st->r[st->n++];
   r->w = (uint8_t *)malloc((size_t)wn); memcpy(r->w, w, (size_t)wn); r->wn = wn;
   r->b = (uint8_t *)malloc(n ? (size_t)n : 1); memcpy(r->b, b, (size_t)n); r->n = n;
+  pthread_mutex_unlock(&st_mu);
   return 0;
 }
 static void st_free(Store *st) { for (size_t i = 0; i < st->n; i++) { free(st->r[i].w); free(st->r[i].b); } free(st->r); memset(st, 0, sizeof *st); }
@@ -191,7 +198,7 @@ int main(void) {
     /* wrong arity refuses before any node is emitted */
     { SlateDag *d = slate_dag_new(); int32_t r3 = 0; CHECK(slate_refused(slate_dag_splice(d, f, args, 1, &r3), "args") && r3 == -1, "4: wrong arity not refused"); slate_dag_free(d); }
     slate_frag_free(f); slate_dag_free(lb);
-    printf("  fragment: A/B kept with two holes (one byte cell per byte, walked back), loaded by its word (scalar), spliced over 7·G'/2·G' reads 7/2, invoked by its word reads 7/2\n");
+    printf("  fragment: A/B kept with two holes (one cell per piece, walked back), loaded by its word (scalar), spliced over 7·G'/2·G' reads 7/2, invoked by its word reads 7/2\n");
     free(fw); st_free(&st);
   }
 
