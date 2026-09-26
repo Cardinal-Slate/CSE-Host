@@ -618,7 +618,74 @@ int main(void) {
     printf("  work: a program that tails into itself stops Incomplete when its declared work is spent, and run again with room replays what it kept and closes\n");
   }
 
+  /* ---- 10. an ask names its inputs: the program's operands, each by its word, bound to its holes in order ---- */
+  {
+    Store st; memset(&st, 0, sizeof st);
+    SlateDag *b = slate_dag_new(); slate_dag_codec(b, NULL, st_get, st_put, NULL, 0, &st);
+    const uint8_t zero3[3] = {0, 0, 0};
+    const uint32_t h0 = slate_dag_carrier_bytes(b, zero3, 3), h1 = slate_dag_carrier_bytes(b, zero3, 3);
+    const int32_t p = slate_dag_param(b, 0);
+    const int32_t root = slate_dag_add(b, slate_dag_load(b, h0, p), slate_dag_mul(b, slate_dag_load(b, h1, p), slate_dag_lit(b, 10)));
+    uint8_t *pw = NULL; uint64_t pwn = 0;
+    const uint32_t holes[2] = { h0, h1 };
+    CHECK(slate_dag_save_fragment(b, root, holes, 2, &pw, &pwn) == NULL, "10: the program was not kept");
+    slate_dag_free(b);
+    /* the asker, the way a browser asks: each input kept as a leaf, then the ask's bytes — no roster, the dims, the
+       program's word, each input's word — kept as a leaf too; its word is the ask */
+    SlateDag *a = slate_dag_new(); slate_dag_codec(a, NULL, st_get, st_put, NULL, 0, &st);
+    const uint8_t x[3] = {1, 2, 3}, y[3] = {4, 5, 6}, ghost[32] = {7, 7, 7, 7, 7, 7, 7, 7};
+    uint8_t *xw = NULL, *yw = NULL; uint64_t xwn = 0, ywn = 0;
+    CHECK(slate_dag_leaf(a, x, 3, &xw, &xwn) == 0 && slate_dag_leaf(a, y, 3, &yw, &ywn) == 0, "10: the inputs were not kept");
+    uint8_t buf[1024]; uint64_t bn = 0;
+#define PUT32(v) do { uint32_t _v = (v); memcpy(buf + bn, &_v, 4); bn += 4; } while (0)
+#define PUT64(v) do { uint64_t _v = (v); memcpy(buf + bn, &_v, 8); bn += 8; } while (0)
+#define PUTW(w, n) do { PUT64(n); memcpy(buf + bn, (w), (size_t)(n)); bn += (n); } while (0)
+    PUT32(0); PUT32(1); PUT64(3); PUTW(pw, pwn); PUTW(xw, xwn); PUTW(yw, ywn);
+    uint8_t *ask = NULL; uint64_t askn = 0;
+    CHECK(slate_dag_leaf(a, buf, bn, &ask, &askn) == 0, "10: the ask was not kept");
+    /* the taker: the ask alone — the program and its inputs are walked back by their words */
+    SlateDag *t = slate_dag_new(); slate_dag_codec(t, NULL, st_get, st_put, NULL, 0, &st);
+    CHECK(slate_dag_take_ask(t, ask, askn, NULL, 0) == NULL, "10: the ask was not taken");
+    SlateArray *r = slate_dag_start(t, NULL, 0);
+    int64_t num[3] = {0}, den[3] = {0};
+    CHECK(r && slate_array_i64_unsafe(r, num, den) == NULL && num[0] == 41 && num[1] == 52 && num[2] == 63,
+          "10: the program over its inputs read %lld %lld %lld (want 41 52 63)", (long long)num[0], (long long)num[1], (long long)num[2]);
+    slate_array_free(r);
+    /* the taker says the same ask: its inputs ride with it */
+    uint8_t *again = NULL; uint64_t againn = 0;
+    CHECK(slate_dag_ask(t, &again, &againn) == 0 && againn == askn && !memcmp(again, ask, (size_t)askn), "10: the taker's ask is another ask");
+    slate_dag_free(t);
+    /* an input the store does not hold is not an input: the ask is not taken */
+    bn = 0;
+    PUT32(0); PUT32(1); PUT64(3); PUTW(pw, pwn); PUTW(xw, xwn); PUTW(ghost, sizeof ghost);
+    uint8_t *ask3 = NULL; uint64_t ask3n = 0;
+    CHECK(slate_dag_leaf(a, buf, bn, &ask3, &ask3n) == 0, "10: the second ask was not kept");
+    SlateDag *v = slate_dag_new(); slate_dag_codec(v, NULL, st_get, st_put, NULL, 0, &st);
+    CHECK(slate_refused(slate_dag_take_ask(v, ask3, ask3n, NULL, 0), "args"), "10: an ask naming an input the store does not hold was taken");
+    /* a count that runs past the ask's end is no ask */
+    bn = 0;
+    PUT32(0); PUT32(1); PUT64(3); PUTW(pw, pwn); PUT64(~(uint64_t)0);
+    uint8_t *ask4 = NULL; uint64_t ask4n = 0;
+    CHECK(slate_dag_leaf(a, buf, bn, &ask4, &ask4n) == 0 && slate_refused(slate_dag_take_ask(v, ask4, ask4n, NULL, 0), "args"),
+          "10: an input count past the ask's end was taken");
+#undef PUT32
+#undef PUT64
+#undef PUTW
+    slate_dag_free(a);
+    /* bytes read back are the bytes kept: the mirror door */
+    { SlateDag *m = slate_dag_new(); slate_dag_codec(m, NULL, st_get, st_put, NULL, 0, &st);
+      const uint8_t text[] = "bytes handed in, read back whole";
+      uint8_t *w = NULL, *back = NULL; uint64_t wn = 0, bn = 0;
+      CHECK(slate_dag_leaf(m, text, sizeof text - 1, &w, &wn) == 0 && slate_dag_leaf_read(m, w, wn, &back, &bn) == NULL &&
+            bn == sizeof text - 1 && !memcmp(back, text, (size_t)bn), "10: bytes read back were not the bytes kept");
+      CHECK(slate_refused(slate_dag_leaf_read(m, (const uint8_t *)"nothing", 7, &back, &bn), "args") || bn == 0, "10: a word nobody kept read as bytes");
+      free(w); free(back); slate_dag_free(m); }
+    slate_dag_free(v);
+    free(pw); free(xw); free(yw); free(ask); free(again); free(ask3); free(ask4); st_free(&st);
+    printf("  inputs: an ask names its program's inputs by their words; the taker walks them back and binds them to the holes; an input the store lacks is no ask\n");
+  }
+
   if (fails) { printf("FAIL test_abi_embed: %d checks failed\n", fails); return 1; }
-  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; a pinned share is its own row and refuses a bad modulus; a program is a leaf, run by name; which leaf is context; a roster's share is a run of it, its ask carries no division, and its cell words; the declared work bounds a program's ticks\n");
+  printf("PASS test_abi_embed: grant + host; the effect is a row; fail-closed; fibers overlap; a pinned share is its own row and refuses a bad modulus; a program is a leaf, run by name; which leaf is context; a roster's share is a run of it, its ask carries no division, and its cell words; the declared work bounds a program's ticks; an ask names its inputs by word; bytes read back are the bytes kept\n");
   return 0;
 }

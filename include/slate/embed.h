@@ -123,6 +123,11 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
  *
  *     [k u32][roster prime i64] * k
  *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn
+ *     ([wn u64][input word u8] * wn) * to the end
+ *
+ * The inputs follow the program the way a step's operands follow its op: each by its word, a leaf like the
+ * program, bound to the program's holes in order when a taker starts it. No count rides with them —
+ * the end of the ask is the end of the list.
  *
  * The division is not in it, and never was in a word: how many units a roster is cut into is the deployment's
  * rule, the same on every unit, so re-dividing one renames nothing it ever named.
@@ -149,6 +154,12 @@ int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn);
 /// @return 0; nonzero on a null argument, no bytes, a store that kept nothing, or a buffer that could not be
 ///         allocated.
 int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn);
+
+/// Bytes read back, the mirror of slate_dag_leaf: the leaf `word` names, walked out of this container's store to the
+/// first cell nobody has. `*bytes` is malloc'd (the caller frees it with free()).
+/// @return NULL; "args" when nothing is under the word; "partial" when a cell is on some carriers but not all.
+const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uint64_t wn, uint8_t **bytes, uint64_t *n);
+
 
 /// Configure this container from the ask that `word` names, with `primes` as its lens — the share this machine
 /// carries. The ask's leaf is walked out of this container's store (word ‖ 0, word ‖ 1, … to the first cell

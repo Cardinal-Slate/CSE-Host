@@ -121,6 +121,9 @@ struct SlateDag {
   std::vector<uint8_t> tail_prog_buf;   /* the tail-continuation slot: "slate.tail" writes the next program's word here */
   bool tail_flag_buf = false;           /* set when a tail hand-off was recorded; the run trampoline reads it */
   std::vector<int64_t> dims_buf;        /* the dims of the last dispatch (or the ones an ask brought): the ask's dims */
+  /* the program's inputs, in its holes' order: each a leaf, named by its word the way a step names its operands,
+     and its bytes as the leaf read back. The first program a start runs is spliced with them. */
+  std::vector<std::vector<uint8_t>> input_words, input_bytes;
   explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), want_device(false) {
     arena.env().frag_ops  = engine_frag_ops();  /* self-hosting seam: emit/run reach the engine, not a host */
     arena.env().frag_self = this;               /* typed owner back-pointer; emit verifies it matches the arena */
@@ -642,7 +645,7 @@ extern "C" int32_t slate_dag_asr(SlateDag *b, int32_t x, int32_t sh) try {
  * Incomplete with obligation Resume; run again with a larger bound and every tick already kept is a hit. No
  * clock is read: a bound is declared before the work, never measured during it. 0 = no bound. */
 static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, const std::vector<long long> &dv,
-                                     Slate::ArrayReading ar) {
+                                     Slate::ArrayReading ar, bool bind_inputs) {
   const uint64_t cap = b->arena.env().work_cap;
   uint64_t ticks = 0;
   while (b->tail_flag_buf) {
@@ -671,7 +674,14 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
     /* the program's leaf, walked out of this container's store by its word — the store is the memory */
     SlateFrag *f = slate_frag_load(t, cur.data(), (uint64_t)cur.size());
     if (!f) { delete t; return Slate::ArrayReading{}; }
-    int32_t tr = -1; slate_dag_splice(t, f, nullptr, 0, &tr);
+    /* the program a start names takes the container's inputs into its holes, in order — its operands; a hand-off
+       after it takes none */
+    std::vector<uint32_t> in;
+    if (bind_inputs)
+      for (const auto &bytes : b->input_bytes)
+        in.push_back(slate_dag_carrier_bytes(t, bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()));
+    bind_inputs = false;
+    int32_t tr = -1; slate_dag_splice(t, f, in.empty() ? nullptr : in.data(), (uint32_t)in.size(), &tr);
     slate_frag_free(f);
     if (tr < 0) { delete t; return Slate::ArrayReading{}; }
     { Slate::CtxScope tcs(t->arena); ar = t->build.run(tr, dv); }
@@ -700,12 +710,21 @@ struct RunScope {
 static bool run_dims(SlateDag *b, bool recall, const int64_t *dims, uint32_t ndims, std::vector<long long> &dv) {
   if (recall && !dims && !ndims) {
     if (b->dims_buf.empty()) return false;
-    dv.assign(b->dims_buf.begin(), b->dims_buf.end());
-    return true;
+    const std::vector<int64_t> carried = b->dims_buf;                  /* the same bound as named dims */
+    return run_dims(b, false, carried.data(), (uint32_t)carried.size(), dv);
   }
   if ((!dims && ndims) || !ndims) return false;
   dv.resize(ndims);
-  for (uint32_t i = 0; i < ndims; i++) { if (dims[i] < 0) return false; dv[i] = (long long)dims[i]; }
+  /* the grid is only as large as the budget the container declared: a cell is at least a word, so a grid of more
+     cells than the budget holds words is refused before a byte is made for it */
+  const uint64_t cap = b->arena.env().mem_budget / 8;
+  uint64_t cells = 1;
+  for (uint32_t i = 0; i < ndims; i++) {
+    if (dims[i] < 0) return false;
+    dv[i] = (long long)dims[i];
+    if (dims[i] && cells > cap / (uint64_t)dims[i]) return false;
+    cells *= (uint64_t)dims[i];
+  }
   b->dims_buf.assign(dims, dims + ndims);   /* what this container last ran over: the ask's dims */
   return true;
 }
@@ -743,7 +762,7 @@ static SlateArray *dag_dispatch(SlateDag *b, int32_t root, const int64_t *dims, 
     b->tail_flag_buf = true;                                /* the first step is a hand-off to the configured word */
     b->tail_prog_buf = b->arena.env().program;
   }
-  Slate::ArrayReading ar = run_ticks(b, {}, dv, std::move(first));
+  Slate::ArrayReading ar = run_ticks(b, {}, dv, std::move(first), root < 0);
   if (!ar.buffer()) return nullptr;            /* refused dispatch (non-lowerable / >int64): no wrong value */
   return new SlateArray{std::move(ar), b->arena.env().codec};
 }
@@ -775,7 +794,11 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
  *
  *     [k u32][roster prime i64] * k
  *     [ndims u32][dim i64] * ndims [wn u64][program word u8] * wn
+ *     ([wn u64][input word u8] * wn) * to the end
  *
+ * The inputs follow the program the way a step's operands follow its op: each one's word, and nothing beside
+ * them — no count, the end of the ask is the end of the list. An input is a leaf like the program, so it travels
+ * as its word, and the taker walks it back out of its own store.
  * Nothing rides in front of it: no tag byte, no version byte. The construction does not travel — only its word
  * does. The program is a leaf like any bytes handed in, so with a roster it is already sliced across the
  * carrying machines and the taker walks it back through the same door it reads any other row through. There is
@@ -820,6 +843,7 @@ extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try 
   for (int64_t d : b->dims_buf) ask_put_u64(a, (uint64_t)d);
   ask_put_u64(a, (uint64_t)wn);
   a.insert(a.end(), w, w + wn);
+  for (const auto &iw : b->input_words) { ask_put_u64(a, (uint64_t)iw.size()); a.insert(a.end(), iw.begin(), iw.end()); }
   /* the ask goes through the door like every other bytes handed in: one cell per piece, under the word of the
      lens in the clear ‖ the bytes, on the roster lens when this container carries a share of one. The word is
      all that leaves — an Interest for it is "run this ask". A store that kept nothing refuses. */
@@ -846,6 +870,23 @@ extern "C" int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uin
   return 0;
 } catch (...) { return 1; }
 
+/* bytes read back: the mirror of slate_dag_leaf — the leaf `word` names, walked out of this container's store cell
+   by cell to the first nobody has. The same door as every other read, so a container carrying a share of a roster
+   gathers the whole leaf. */
+extern "C" const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uint64_t wn, uint8_t **bytes, uint64_t *n) try {
+  if (!b || !word || !wn || !bytes || !n) return "args";
+  *bytes = nullptr; *n = 0;
+  std::vector<uint8_t> out;
+  bool partial = false;
+  if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, Slate::Word(word, word + wn), out, partial))
+    return partial ? "partial" : "args";
+  uint8_t *o = (uint8_t *)std::malloc(out.size() ? out.size() : 1);
+  if (!o) return "internal";
+  if (!out.empty()) std::memcpy(o, out.data(), out.size());
+  *bytes = o; *n = (uint64_t)out.size();
+  return nullptr;
+} catch (...) { return "internal"; }
+
 extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn,
                                           const int64_t *primes, uint32_t k) try {
   if (!b || !word || !wn || (k && !primes)) return "args";
@@ -859,16 +900,31 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   const uint64_t n = (uint64_t)ask.size();
   AskRd r{ ask.data(), n, 0 };
   uint32_t rk = 0, ndims = 0;
-  if (!r.u32v(rk)) return "args";
+  /* a count is only believed as far as the bytes behind it go: an ask that names more primes or dims than it
+     carries is refused before anything is made for them */
+  if (!r.u32v(rk) || rk > (r.n - r.cur) / 8) return "args";
   std::vector<int64_t> roster(rk);
   for (uint32_t i = 0; i < rk; i++) if (!r.i64v(roster[i])) return "args";
-  if (!r.u32v(ndims)) return "args";
+  if (!r.u32v(ndims) || ndims > (r.n - r.cur) / 8) return "args";
   std::vector<int64_t> dims(ndims);
   for (uint32_t i = 0; i < ndims; i++) { if (!r.i64v(dims[i]) || dims[i] < 0) return "args"; }
   uint64_t pwn = 0;
-  if (!r.u64v(pwn) || r.cur + pwn > r.n) return "args";
+  if (!r.u64v(pwn) || pwn > r.n - r.cur) return "args";
   const uint8_t *prog = ask.data() + r.cur;
   r.cur += pwn;
+  /* the inputs, each by its word, walked back out of this container's store; one the store does not hold, or
+     holds only part of, is not an input yet and the ask is not taken */
+  std::vector<std::vector<uint8_t>> iwords, ibytes;
+  while (r.cur < r.n) {
+    uint64_t iwn = 0;
+    if (!r.u64v(iwn) || !iwn || iwn > r.n - r.cur) return "args";
+    std::vector<uint8_t> iw(ask.data() + r.cur, ask.data() + r.cur + iwn), ib;
+    r.cur += iwn;
+    bool ipart = false;
+    if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, Slate::Word(iw.begin(), iw.end()), ib, ipart))
+      return ipart ? "partial" : "args";
+    iwords.push_back(std::move(iw)); ibytes.push_back(std::move(ib));
+  }
   /* the roster first, then this machine's own share of it, then what to run and over what. The lens is cleared
      first so an ask always lands on a fresh statement — a container's old primes are not a reason to refuse
      the roster its ask names. */
@@ -880,6 +936,8 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
      by the door. */
   if (const char *rc = slate_dag_program(b, pwn ? prog : nullptr, pwn)) return rc;
   b->dims_buf = std::move(dims);
+  b->input_words = std::move(iwords);
+  b->input_bytes = std::move(ibytes);
   return nullptr;
 } catch (...) { return "internal"; }
 

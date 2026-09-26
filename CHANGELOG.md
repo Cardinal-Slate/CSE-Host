@@ -2,6 +2,18 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.14.0
+
+An ask names its inputs by word, the way a step names its operands: after the program's word come zero or more
+`[u64 wn][word]`, each a leaf the container's store holds, and the program's holes are bound to them in order. An
+input the store does not hold refuses the ask ("args"); one held only in part is "partial".
+An asker keeps each input as a leaf (`slate_dag_leaf`) and names it; `slate_dag_ask` says a taken ask's inputs again.
+`slate_dag_leaf_read(b, word, wn, &bytes, &n)` reads a leaf back — the mirror of
+`slate_dag_leaf` — and says "partial" when a carrier is down, never "none".
+
+`slate_dag_take_ask` checks every count against the bytes left before it reads, so no count in an ask can wrap an
+index or ask for more than the ask holds; a run's grid is at most `mem_budget / 8` cells.
+
 ## 0.13.0
 
 `slate_dag_tmpfs` is removed from the C ABI (there is no ram filesystem: bytes a computation keeps are a leaf in the
