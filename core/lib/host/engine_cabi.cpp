@@ -8,6 +8,7 @@
 // anything else) becomes the entry's refusal name. Exposes only the C symbols those three headers declare; the
 // contracts live on those declarations.
 #include <functional>
+#include <thread>
 #include <unistd.h>      /* the engine's built-in fd byte-stream: read/write/close */
 #include "slate/providers/host/io.hpp"   /* the file/tcp open providers + install_io_providers() */
 #include "slate/engine/engine.hpp"
@@ -124,6 +125,9 @@ struct SlateDag {
   /* the program's inputs, in its holes' order: each a leaf, named by its word the way a step names its operands,
      and its bytes as the leaf read back. The first program a start runs is spliced with them. */
   std::vector<std::vector<uint8_t>> input_words, input_bytes;
+  /* the program's bytes, when take_ask walked its leaf beside the inputs: read by the first tick of the start that
+     follows and dropped with it — the ask's own scratch, not a thing kept; empty otherwise, and the tick walks the leaf */
+  std::vector<uint8_t> program_bytes;
   explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), want_device(false) {
     arena.env().frag_ops  = engine_frag_ops();  /* self-hosting seam: emit/run reach the engine, not a host */
     arena.env().frag_self = this;               /* typed owner back-pointer; emit verifies it matches the arena */
@@ -644,6 +648,8 @@ extern "C" int32_t slate_dag_asr(SlateDag *b, int32_t x, int32_t sh) try {
  * against). Each tick is one step of that work. A run that spends it all stops with the last tick's reading,
  * Incomplete with obligation Resume; run again with a larger bound and every tick already kept is a hit. No
  * clock is read: a bound is declared before the work, never measured during it. 0 = no bound. */
+constexpr uint64_t kFragMaxCount = (uint64_t)1 << 30; /* sanity cap on instr / carrier / param / data counts */
+static SlateFrag *frag_parse(const uint8_t *p, size_t n);   /* the fragment parser (below): a tick parses bytes it was handed */
 static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, const std::vector<long long> &dv,
                                      Slate::ArrayReading ar, bool bind_inputs) {
   const uint64_t cap = b->arena.env().work_cap;
@@ -671,8 +677,13 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
      * instead of the old hand-picked subset that silently dropped Potential/budget/executor across a hand-off.
      * te keeps its own frag_self (owner check); a tick may still override any axis locally, scoped to itself. */
     te.inherit_from(be);
-    /* the program's leaf, walked out of this container's store by its word — the store is the memory */
-    SlateFrag *f = slate_frag_load(t, cur.data(), (uint64_t)cur.size());
+    /* the program's leaf, walked out of this container's store by its word — the store is the memory; the first
+       tick of a taken ask has the bytes already, walked beside the inputs when the ask was taken */
+    SlateFrag *f = nullptr;
+    if (!b->program_bytes.empty() && cur == b->arena.env().program) {
+      if (b->program_bytes.size() <= kFragMaxCount) f = frag_parse(b->program_bytes.data(), b->program_bytes.size());
+      std::vector<uint8_t>().swap(b->program_bytes);
+    } else f = slate_frag_load(t, cur.data(), (uint64_t)cur.size());
     if (!f) { delete t; return Slate::ArrayReading{}; }
     /* the program a start names takes the container's inputs into its holes, in order — its operands; a hand-off
        after it takes none */
@@ -763,6 +774,7 @@ static SlateArray *dag_dispatch(SlateDag *b, int32_t root, const int64_t *dims, 
     b->tail_prog_buf = b->arena.env().program;
   }
   Slate::ArrayReading ar = run_ticks(b, {}, dv, std::move(first), root < 0);
+  std::vector<uint8_t>().swap(b->program_bytes);   /* the ask is run: nothing of it stays in the container */
   if (!ar.buffer()) return nullptr;            /* refused dispatch (non-lowerable / >int64): no wrong value */
   return new SlateArray{std::move(ar), b->arena.env().codec};
 }
@@ -786,6 +798,7 @@ extern "C" SlateArray *slate_dag_start(SlateDag *b, const int64_t *dims, uint32_
 extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint64_t n) {
   if (!b || (n && !word)) return "args";
   b->arena.env().program.assign(word, word + n);
+  std::vector<uint8_t>().swap(b->program_bytes);   /* another program named: whatever was walked for the last one goes */
   return nullptr;
 }
 
@@ -913,17 +926,42 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   const uint8_t *prog = ask.data() + r.cur;
   r.cur += pwn;
   /* the inputs, each by its word, walked back out of this container's store; one the store does not hold, or
-     holds only part of, is not an input yet and the ask is not taken */
+     holds only part of, is not an input yet and the ask is not taken. The leaves are independent of one another, so
+     they are walked side by side — each whole, on its own thread, the program's leaf beside them — and judged in
+     order, so the answer is the one a walk in order gives. */
   std::vector<std::vector<uint8_t>> iwords, ibytes;
   while (r.cur < r.n) {
     uint64_t iwn = 0;
     if (!r.u64v(iwn) || !iwn || iwn > r.n - r.cur) return "args";
-    std::vector<uint8_t> iw(ask.data() + r.cur, ask.data() + r.cur + iwn), ib;
+    iwords.emplace_back(ask.data() + r.cur, ask.data() + r.cur + iwn);
     r.cur += iwn;
-    bool ipart = false;
-    if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, Slate::Word(iw.begin(), iw.end()), ib, ipart))
-      return ipart ? "partial" : "args";
-    iwords.push_back(std::move(iw)); ibytes.push_back(std::move(ib));
+  }
+  ibytes.resize(iwords.size());
+  {
+    const size_t nl = iwords.size() + (pwn ? 1 : 0);           /* the leaves: the inputs, and the program last */
+    std::vector<char> ok(nl, 0), part(nl, 0); std::vector<uint8_t> pbytes;
+    const unsigned hw = Slate::hardware_threads();
+    const unsigned t = nl < hw ? (unsigned)nl : hw;
+    Slate::Envelope each = b->arena.store_env();               /* each walk fans within what its share of the machine is */
+    each.thread_cap = t ? (int)((hw + t - 1) / t) : 1; if (each.thread_cap < 1) each.thread_cap = 1;
+    const Slate::Codec &wc = b->arena.env().codec;
+    auto walk = [&](size_t i) {
+      bool ip = false;
+      if (i < iwords.size()) ok[i] = Slate::leaf_get(each, wc, Slate::Word(iwords[i].begin(), iwords[i].end()), ibytes[i], ip) ? 1 : 0;
+      else ok[i] = Slate::leaf_get(each, wc, Slate::Word(prog, prog + pwn), pbytes, ip) ? 1 : 0;
+      part[i] = ip ? 1 : 0;
+    };
+    if (t <= 1) { for (size_t i = 0; i < nl; i++) walk(i); }
+    else {
+      std::vector<std::thread> ts;
+      for (unsigned k = 1; k < t; k++) ts.emplace_back([&, k] { for (size_t i = k; i < nl; i += t) walk(i); });
+      for (size_t i = 0; i < nl; i += t) walk(i);
+      for (auto &th : ts) th.join();
+    }
+    for (size_t i = 0; i < iwords.size(); i++) if (!ok[i]) return part[i] ? "partial" : "args";
+    /* the program's leaf: nothing under its word, or not whole yet, is what the tick would find — it says so then,
+       as it always has; here the bytes are only carried when the walk found them whole */
+    if (pwn && ok[nl - 1]) b->program_bytes = std::move(pbytes); else std::vector<uint8_t>().swap(b->program_bytes);
   }
   /* the roster first, then this machine's own share of it, then what to run and over what. The lens is cleared
      first so an ask always lands on a fresh statement — a container's old primes are not a reason to refuse
@@ -1126,7 +1164,6 @@ extern "C" void slate_array_free(SlateArray *a) {
  * ---------------------------------------------------------------------------------------------------------- */
 namespace {
 
-constexpr uint64_t kFragMaxCount = (uint64_t)1 << 30; /* sanity cap on instr / carrier / param / data counts */
 /* the features a fragment may declare (its header lists the names it uses; a name this engine does not know refuses
    the load): "division" (mulh/asr instrs), "effects" (scalar OS-effect nodes: a trailing effect table),
    "effect-arrays" (byte / io effect carriers: a trailing effect-array table). */
