@@ -128,6 +128,9 @@ struct SlateDag {
   /* the program's bytes, when take_ask walked its leaf beside the inputs: read by the first tick of the start that
      follows and dropped with it — the ask's own scratch, not a thing kept; empty otherwise, and the tick walks the leaf */
   std::vector<uint8_t> program_bytes;
+  /* the answer of a taken ask whose root the store already holds whole (take_ask asked it before reading the inputs):
+     what the start that follows hands back, and dropped with it — the ask's own scratch, like program_bytes */
+  std::unique_ptr<Slate::ArrayReading> kept_answer;
   explicit SlateDag(size_t abytes) : arena(abytes), build(arena), err(false), want_device(false) {
     arena.env().frag_ops  = engine_frag_ops();  /* self-hosting seam: emit/run reach the engine, not a host */
     arena.env().frag_self = this;               /* typed owner back-pointer; emit verifies it matches the arena */
@@ -687,10 +690,18 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
     if (!f) { delete t; return Slate::ArrayReading{}; }
     /* the program a start names takes the container's inputs into its holes, in order — its operands; a hand-off
        after it takes none */
+    /* an input an ask named is named by its word — the leaf's word the ask carries, the name the whole fleet already
+       reads it by — and not by a hash of its bytes: two names for one input, and the one that needs its bytes to be
+       spelled goes. So a root over inputs is spelled from words alone, and asked before any input is read (take_ask). */
     std::vector<uint32_t> in;
     if (bind_inputs)
-      for (const auto &bytes : b->input_bytes)
-        in.push_back(slate_dag_carrier_bytes(t, bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()));
+      for (size_t i = 0; i < b->input_bytes.size(); i++) {
+        const std::vector<uint8_t> &bytes = b->input_bytes[i];
+        if (i < b->input_words.size() && !b->input_words[i].empty())
+          in.push_back(t->build.a.lower_register_carrier_ident(wbuf_from_bytes(bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()),
+                                                                Slate::bytes_buffer(b->input_words[i].data(), b->input_words[i].size())));
+        else in.push_back(slate_dag_carrier_bytes(t, bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()));
+      }
     bind_inputs = false;
     int32_t tr = -1; slate_dag_splice(t, f, in.empty() ? nullptr : in.data(), (uint32_t)in.size(), &tr);
     slate_frag_free(f);
@@ -761,6 +772,12 @@ static void keep_program_leaf(SlateDag *b, int32_t root) {
  * word, and from there it is the same trampoline as a run that handed off. */
 static SlateArray *dag_dispatch(SlateDag *b, int32_t root, const int64_t *dims, uint32_t ndims) {
   std::vector<long long> dv;
+  if (b && root < 0 && b->kept_answer && !dims && !ndims) {   /* the taken ask's root, found whole before its inputs */
+    Slate::ArrayReading ar = std::move(*b->kept_answer);
+    b->kept_answer.reset(); std::vector<uint8_t>().swap(b->program_bytes);
+    return new SlateArray{std::move(ar), b->arena.env().codec};
+  }
+  if (b) b->kept_answer.reset();
   if (!b || !run_dims(b, root < 0, dims, ndims, dv)) return nullptr;
   if (root >= 0 && !b->arena.env().channels.roster.empty() && b->arena.env().program.empty())
     keep_program_leaf(b, root);                /* a container carrying a roster names its construction first */
@@ -799,6 +816,7 @@ extern "C" const char *slate_dag_program(SlateDag *b, const uint8_t *word, uint6
   if (!b || (n && !word)) return "args";
   b->arena.env().program.assign(word, word + n);
   std::vector<uint8_t>().swap(b->program_bytes);   /* another program named: whatever was walked for the last one goes */
+  b->kept_answer.reset();
   return nullptr;
 }
 
@@ -900,6 +918,35 @@ extern "C" const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uin
   return nullptr;
 } catch (...) { return "internal"; }
 
+/* A taken ask's root, asked before its inputs are read: the program spliced into a tick of its own, each input a
+   carrier named by its leaf's word (as run_ticks names it) holding nothing yet — a step's word is a record over its
+   children's words and a carrier's by its name, never its value — and the root looked up (DagBuild::kept). Kept
+   whole, it is what the start that follows hands back; otherwise nothing is set and the tick is dropped. A
+   construction that reaches an effect is never answered here: its effects come first, as they always have. */
+static void ask_kept(SlateDag *b) {
+  std::vector<long long> dv;
+  if (!run_dims(b, true, nullptr, 0, dv) || b->program_bytes.size() > kFragMaxCount) return;
+  SlateDag *t = new (std::nothrow) SlateDag();
+  if (!t) return;
+  t->arena.env().inherit_from(b->arena.env());
+  SlateFrag *f = frag_parse(b->program_bytes.data(), b->program_bytes.size());
+  if (f) {
+    const std::shared_ptr<const Slate::WBuffer> none = std::make_shared<const Slate::WBuffer>((size_t)1, 1);
+    std::vector<uint32_t> in;
+    for (const auto &w : b->input_words) in.push_back(t->build.a.lower_register_carrier_ident(none, Slate::bytes_buffer(w.data(), w.size())));
+    int32_t tr = -1;
+    const char *e = slate_dag_splice(t, f, in.empty() ? nullptr : in.data(), (uint32_t)in.size(), &tr);
+    slate_frag_free(f);
+    if (!e && tr >= 0) {
+      RunScope scope(b);
+      Slate::CtxScope tcs(t->arena);
+      Slate::ArrayReading ar = t->build.kept(tr, dv);
+      if (ar.buffer()) b->kept_answer.reset(new Slate::ArrayReading(std::move(ar)));
+    }
+  }
+  delete t;
+}
+
 extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn,
                                           const int64_t *primes, uint32_t k) try {
   if (!b || !word || !wn || (k && !primes)) return "args";
@@ -925,30 +972,19 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   if (!r.u64v(pwn) || pwn > r.n - r.cur) return "args";
   const uint8_t *prog = ask.data() + r.cur;
   r.cur += pwn;
-  /* the inputs, each by its word, walked back out of this container's store; one the store does not hold, or
-     holds only part of, is not an input yet and the ask is not taken. The leaves are walked side by side — one walk
-     over all of them, the program's leaf last, in the same rounds over one fan (Slate::leaves_get) — and judged in
-     order, so the answer is the one a walk in order gives. */
-  std::vector<std::vector<uint8_t>> iwords, ibytes;
+  std::vector<std::vector<uint8_t>> iwords;
   while (r.cur < r.n) {
     uint64_t iwn = 0;
     if (!r.u64v(iwn) || !iwn || iwn > r.n - r.cur) return "args";
     iwords.emplace_back(ask.data() + r.cur, ask.data() + r.cur + iwn);
     r.cur += iwn;
   }
-  {
-    const size_t nl = iwords.size() + (pwn ? 1 : 0);           /* the leaves: the inputs, and the program last */
-    std::vector<Slate::Word> keys(nl); std::vector<std::vector<uint8_t>> got(nl);
-    std::unique_ptr<bool[]> ok(new bool[nl ? nl : 1]()), part(new bool[nl ? nl : 1]());
-    for (size_t i = 0; i < iwords.size(); i++) keys[i] = Slate::Word(iwords[i].begin(), iwords[i].end());
-    if (pwn) keys[nl - 1] = Slate::Word(prog, prog + pwn);
-    if (nl) Slate::leaves_get(b->arena.store_env(), b->arena.env().codec, keys.data(), nl, got.data(), ok.get(), part.get());
-    for (size_t i = 0; i < iwords.size(); i++) if (!ok[i]) return part[i] ? "partial" : "args";
-    ibytes.assign(std::make_move_iterator(got.begin()), std::make_move_iterator(got.begin() + (ptrdiff_t)iwords.size()));
-    /* the program's leaf: nothing under its word, or not whole yet, is what the tick would find — it says so then,
-       as it always has; here the bytes are only carried when the walk found them whole */
-    if (pwn && ok[nl - 1]) b->program_bytes = std::move(got[nl - 1]); else std::vector<uint8_t>().swap(b->program_bytes);
-  }
+  const Slate::Envelope &senv = b->arena.store_env();
+  const Slate::Codec &wc = b->arena.env().codec;
+  /* the program's leaf: nothing under its word, or not whole yet, is what the tick would find — it says so then, as
+     it always has; here the bytes are only carried when the walk found them whole */
+  std::vector<uint8_t> pbytes; bool pok = false, ppart = false;
+  if (pwn) { const Slate::Word pk(prog, prog + pwn); Slate::leaves_get(senv, wc, &pk, 1, &pbytes, &pok, &ppart); }
   /* the roster first, then this machine's own share of it, then what to run and over what. The lens is cleared
      first so an ask always lands on a fresh statement — a container's old primes are not a reason to refuse
      the roster its ask names. */
@@ -961,7 +997,24 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   if (const char *rc = slate_dag_program(b, pwn ? prog : nullptr, pwn)) return rc;
   b->dims_buf = std::move(dims);
   b->input_words = std::move(iwords);
-  b->input_bytes = std::move(ibytes);
+  b->input_bytes.clear();
+  if (pwn && pok) b->program_bytes = std::move(pbytes);
+  /* The root, asked before any input is read. An input is named by its leaf's word (run_ticks), so the root's word
+     is spelled from the construction and the words the ask carries; the store holding it whole is the answer, and
+     the inputs' bytes are never read. Otherwise the inputs are walked, side by side in one walk (leaves_get), and
+     judged in order: one the store does not hold, or holds only part of, is not an input yet and the ask is not taken. */
+  if (!b->program_bytes.empty()) ask_kept(b);
+  if (b->kept_answer) return nullptr;
+  const size_t ni = b->input_words.size();
+  if (ni) {
+    std::vector<Slate::Word> keys(ni); std::vector<std::vector<uint8_t>> got(ni);
+    std::unique_ptr<bool[]> ok(new bool[ni]()), part(new bool[ni]());
+    for (size_t i = 0; i < ni; i++) keys[i] = Slate::Word(b->input_words[i].begin(), b->input_words[i].end());
+    Slate::leaves_get(senv, wc, keys.data(), ni, got.data(), ok.get(), part.get());
+    for (size_t i = 0; i < ni; i++)
+      if (!ok[i]) { std::vector<uint8_t>().swap(b->program_bytes); return part[i] ? "partial" : "args"; }
+    b->input_bytes = std::move(got);
+  }
   return nullptr;
 } catch (...) { return "internal"; }
 

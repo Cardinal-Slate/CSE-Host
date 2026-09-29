@@ -126,8 +126,10 @@ const char *slate_dag_roster(SlateDag *b, const int64_t *primes, uint32_t k);
  *     ([wn u64][input word u8] * wn) * to the end
  *
  * The inputs follow the program the way a step's operands follow its op: each by its word, a leaf like the
- * program, bound to the program's holes in order when a taker starts it. No count rides with them —
- * the end of the ask is the end of the list.
+ * program, bound to the program's holes in order when a taker starts it — and named there by that word, never by
+ * a hash of its bytes, so the root of a run is spelled from the program and the words alone and a taker asks for
+ * it before it reads any input (slate_dag_take_ask). No count rides with them — the end of the ask is the end of
+ * the list.
  *
  * The division is not in it, and never was in a word: how many units a roster is cut into is the deployment's
  * rule, the same on every unit, so re-dividing one renames nothing it ever named.

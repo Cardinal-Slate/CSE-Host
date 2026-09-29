@@ -2,6 +2,26 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.16.0
+
+An input an ask names is named by its leaf's word. An input had two names: the leaf's word the ask carries — the name
+every unit already reads it by — and the keyed hash of its bytes, which the run spelled as the identity of the carrier
+it bound them to (`slate_dag_carrier_bytes` → `ident_of_`). The second goes: `run_ticks` binds each hole a start fills
+from an ask to a carrier whose identity is the input's word (`lower_register_carrier_ident`), so the word of every step
+over an input changes, once — a run kept under the old names is a miss the first time it is asked again, computed and
+kept under the new ones (the slang gate states it) — and nothing else does: leaves, their cells, the ask's and the
+program's leaves, and every step over a carrier bound by value keep their words byte for byte. A program run through
+`slate_invoke` (the integrations, handed bytes, not words) names its inputs by their bytes as before.
+
+What it buys: a root over inputs is spelled from words alone. `slate_dag_take_ask` reads the program's leaf, splices it
+into a tick whose input carriers are named and hold nothing, and asks the root (CSE-DAG 0.14.0's `DagBuild::kept`);
+kept whole, that reading is what the start that follows hands back and the inputs are never read. Otherwise it reads
+them as before, side by side in one walk, judged in order, the same answers ("partial", "args") for one that is not
+there. A kept SHA-256 block through a unit (CSE-Frontend's own programs) went from 0.67 s and 2.4 CPU-s — nine 32 KB
+tables read for every one of its 34 asks — to about 0.25 s and 0.5 CPU-s. A missing step still has every input read
+before it runs: reading only the leaves a missing step loads would need a carrier that reads itself when first loaded,
+which is a mechanism, and is not here.
+
 ## 0.15.1
 
 Take_ask walks the ask's leaves — its inputs and the program — in one walk (CSE-Arena 0.16.0's `leaves_get`) rather
