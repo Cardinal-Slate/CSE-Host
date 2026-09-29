@@ -2,6 +2,13 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.15.0 — 2026-09-29
+
+The kept-step throughput work, merged into CSE-Core main from the perf branches: words and cell values unchanged
+(checked both ways on every change), every step kept per cell before the answer is given, measured on the durable store.
+
+- Take_ask walks the ask's input leaves side by side, each whole on its own thread with its share of the machine, the program's leaf beside them; the program's bytes are handed to the first tick of the start that follows and dropped with it (the ask's own scratch, cleared when the ask is run or another program is named); the leaves judged in order, so the answer is the one a walk in order gives
+
 ## 0.14.0
 
 An ask names its inputs by word, the way a step names its operands: after the program's word come zero or more
