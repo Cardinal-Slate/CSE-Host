@@ -926,8 +926,8 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   const uint8_t *prog = ask.data() + r.cur;
   r.cur += pwn;
   /* the inputs, each by its word, walked back out of this container's store; one the store does not hold, or
-     holds only part of, is not an input yet and the ask is not taken. The leaves are independent of one another, so
-     they are walked side by side — each whole, on its own thread, the program's leaf beside them — and judged in
+     holds only part of, is not an input yet and the ask is not taken. The leaves are walked side by side — one walk
+     over all of them, the program's leaf last, in the same rounds over one fan (Slate::leaves_get) — and judged in
      order, so the answer is the one a walk in order gives. */
   std::vector<std::vector<uint8_t>> iwords, ibytes;
   while (r.cur < r.n) {
@@ -936,32 +936,18 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
     iwords.emplace_back(ask.data() + r.cur, ask.data() + r.cur + iwn);
     r.cur += iwn;
   }
-  ibytes.resize(iwords.size());
   {
     const size_t nl = iwords.size() + (pwn ? 1 : 0);           /* the leaves: the inputs, and the program last */
-    std::vector<char> ok(nl, 0), part(nl, 0); std::vector<uint8_t> pbytes;
-    const unsigned hw = Slate::hardware_threads();
-    const unsigned t = nl < hw ? (unsigned)nl : hw;
-    Slate::Envelope each = b->arena.store_env();               /* each walk fans within what its share of the machine is */
-    each.thread_cap = t ? (int)((hw + t - 1) / t) : 1; if (each.thread_cap < 1) each.thread_cap = 1;
-    const Slate::Codec &wc = b->arena.env().codec;
-    auto walk = [&](size_t i) {
-      bool ip = false;
-      if (i < iwords.size()) ok[i] = Slate::leaf_get(each, wc, Slate::Word(iwords[i].begin(), iwords[i].end()), ibytes[i], ip) ? 1 : 0;
-      else ok[i] = Slate::leaf_get(each, wc, Slate::Word(prog, prog + pwn), pbytes, ip) ? 1 : 0;
-      part[i] = ip ? 1 : 0;
-    };
-    if (t <= 1) { for (size_t i = 0; i < nl; i++) walk(i); }
-    else {
-      std::vector<std::thread> ts;
-      for (unsigned k = 1; k < t; k++) ts.emplace_back([&, k] { for (size_t i = k; i < nl; i += t) walk(i); });
-      for (size_t i = 0; i < nl; i += t) walk(i);
-      for (auto &th : ts) th.join();
-    }
+    std::vector<Slate::Word> keys(nl); std::vector<std::vector<uint8_t>> got(nl);
+    std::unique_ptr<bool[]> ok(new bool[nl ? nl : 1]()), part(new bool[nl ? nl : 1]());
+    for (size_t i = 0; i < iwords.size(); i++) keys[i] = Slate::Word(iwords[i].begin(), iwords[i].end());
+    if (pwn) keys[nl - 1] = Slate::Word(prog, prog + pwn);
+    if (nl) Slate::leaves_get(b->arena.store_env(), b->arena.env().codec, keys.data(), nl, got.data(), ok.get(), part.get());
     for (size_t i = 0; i < iwords.size(); i++) if (!ok[i]) return part[i] ? "partial" : "args";
+    ibytes.assign(std::make_move_iterator(got.begin()), std::make_move_iterator(got.begin() + (ptrdiff_t)iwords.size()));
     /* the program's leaf: nothing under its word, or not whole yet, is what the tick would find — it says so then,
        as it always has; here the bytes are only carried when the walk found them whole */
-    if (pwn && ok[nl - 1]) b->program_bytes = std::move(pbytes); else std::vector<uint8_t>().swap(b->program_bytes);
+    if (pwn && ok[nl - 1]) b->program_bytes = std::move(got[nl - 1]); else std::vector<uint8_t>().swap(b->program_bytes);
   }
   /* the roster first, then this machine's own share of it, then what to run and over what. The lens is cleared
      first so an ask always lands on a fresh statement — a container's old primes are not a reason to refuse

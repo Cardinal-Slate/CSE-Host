@@ -2,6 +2,14 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.15.1
+
+Take_ask walks the ask's leaves — its inputs and the program — in one walk (CSE-Arena 0.16.0's `leaves_get`) rather
+than a thread per leaf each fanning its own readers: one fan of threads for all of them, and the index words spelled
+once for all of them. The leaves are judged in order as before, so the answer is the one a walk in order gives; the
+program's bytes are carried to the first tick as before. Measured with a unit answering the page's SHA-256 blocks,
+whose asks each read nine 32 KB tables (CSE-Core fleet/right, iteration 3).
+
 ## 0.15.0 — 2026-09-29
 
 The kept-step throughput work, merged into CSE-Core main from the perf branches: words and cell values unchanged
