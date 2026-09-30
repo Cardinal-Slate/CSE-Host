@@ -914,6 +914,7 @@ extern "C" int slate_dag_leaf_proven(SlateDag *b, const uint8_t *bytes, uint64_t
     std::vector<uint8_t> have; bool partial = false;
     if (Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, key, have, partial) && have.size() == n) { if (proven) *proven = 1; }
     else if (!Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, bytes, (size_t)n, false)) return 1;
+    else if (proven) *proven = 2;                                /* kept now, by this call */
   }
   uint8_t *o = (uint8_t *)std::malloc(key.size());
   if (!o) return 1;

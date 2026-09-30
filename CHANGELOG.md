@@ -2,6 +2,14 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.20.1
+
+`slate_dag_leaf_proven` says how it knows: the whole address (0), every cell read back (1), or every cell put by this
+call (2). A leaf this call put is proven by its own puts — the caller may write its whole address once they are on the
+disk — so a leaf gets its row on its first keep and not its second: measured, a first session of SHA's tables and
+programs costs the same either way (a keep syncs before its reply anyway) and the second is 194 → 90 ms. A torn leaf is
+still never taken for kept: it reads short, the call puts every cell again (2), and only then may it get its row.
+
 ## 0.20.0
 
 A leaf's whole address. `slate_dag_leaf_proven` is `slate_dag_leaf` saying whether the leaf was proven kept whole
