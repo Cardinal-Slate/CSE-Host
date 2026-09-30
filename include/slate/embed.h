@@ -163,6 +163,19 @@ int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word
 const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uint64_t wn, uint8_t **bytes, uint64_t *n);
 
 
+/// Bytes kept under a name in a scope, and read back: a leaf, [1][bytes] (so a value of no bytes is a leaf too), under
+///
+///     word_step(kDoorEntry, {scope, word_of(name)})          kDoorEntry: CSE-Arena's door, kDoorJit + 129
+///
+/// through this container's codec — its secret, so a name only a holder of the secret can spell. A unit keeps its
+/// entry's settings this way, one row a name, the scope the entry's word, under the config secret (seam/slate_seed.c):
+/// a packet reads the one value it needs, not the entry. 0 kept; slate_dag_named_read: NULL with *bytes (malloc'd;
+/// free()) and *n, "args" when nothing is kept under the name, "partial" when a cell is on some carriers and not all.
+int slate_dag_named_put(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn,
+                        const uint8_t *bytes, uint64_t n);
+const char *slate_dag_named_read(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn,
+                                 uint8_t **bytes, uint64_t *n);
+
 /// Configure this container from the ask that `word` names, with `primes` as its lens — the share this machine
 /// carries. The ask's leaf is walked out of this container's store (word ‖ 0, word ‖ 1, … to the first cell
 /// nobody has; the records are the count), then the roster it names is set, then the lens (which must be one

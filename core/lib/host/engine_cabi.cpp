@@ -901,6 +901,37 @@ extern "C" int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uin
   return 0;
 } catch (...) { return 1; }
 
+/* Bytes kept under a name in a scope: a leaf under word_step(kDoorEntry, {the scope, word_of(name)}), through this
+   container's codec — so under its secret, and a name nobody holding the secret can spell. The value is kept as
+   [1][bytes], so a value of no bytes is a leaf too. What a unit keeps this way is its entry's settings, one row a name,
+   beside the entry leaf that holds them all. */
+static Slate::Word named_key(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn) {
+  const Slate::Codec &c = b->arena.env().codec;
+  const Slate::Word s(scope, scope + sn), nw = Slate::word_of(c, name, (size_t)nn);
+  return Slate::word_step(c, b->arena.op_word(Slate::Arena::kDoorEntry), {&s, &nw});
+}
+extern "C" int slate_dag_named_put(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn,
+                                   const uint8_t *bytes, uint64_t n) try {
+  if (!b || !scope || !sn || (!name && nn) || (!bytes && n)) return 1;
+  const Slate::Word key = named_key(b, scope, sn, name, nn);
+  std::vector<uint8_t> v(1, 1); if (n) v.insert(v.end(), bytes, bytes + n);
+  return key.empty() || !Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, v.data(), v.size()) ? 1 : 0;
+} catch (...) { return 1; }
+extern "C" const char *slate_dag_named_read(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn,
+                                            uint8_t **bytes, uint64_t *n) try {
+  if (!b || !scope || !sn || (!name && nn) || !bytes || !n) return "args";
+  *bytes = nullptr; *n = 0;
+  const Slate::Word key = named_key(b, scope, sn, name, nn);
+  std::vector<uint8_t> out; bool partial = false;
+  if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, key, out, partial) || out.empty() || out[0] != 1)
+    return partial ? "partial" : "args";
+  uint8_t *o = (uint8_t *)std::malloc(out.size() > 1 ? out.size() - 1 : 1);
+  if (!o) return "internal";
+  if (out.size() > 1) std::memcpy(o, out.data() + 1, out.size() - 1);
+  *bytes = o; *n = (uint64_t)out.size() - 1;
+  return nullptr;
+} catch (...) { return "internal"; }
+
 /* bytes read back: the mirror of slate_dag_leaf — the leaf `word` names, walked out of this container's store cell
    by cell to the first nobody has. The same door as every other read, so a container carrying a share of a roster
    gathers the whole leaf. */

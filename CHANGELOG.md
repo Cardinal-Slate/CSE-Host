@@ -2,6 +2,17 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.18.0
+
+Bytes kept under a name in a scope: `slate_dag_named_put(b, scope, sn, name, nn, bytes, n)` and
+`slate_dag_named_read(…)` keep and read a leaf `[1][bytes]` (so a value of no bytes is a leaf) under
+`word_step(kDoorEntry, {scope, word_of(name)})` (CSE-Arena 0.19.0), through the container's codec — its secret, so a
+name only a holder of the secret can spell. Why: a unit read its whole entry leaf — every setting, the certificate's
+word, every grant — to learn one value, once for every packet (the browser's origin) and again for every run (the
+program's grant, the bounds on a run nobody granted): three quarters of what a kept ask cost it. Its seed now keeps
+each setting as its own row too (CSE-Core's `seam/slate_seed.c`, the scope the entry's word, under the config secret),
+and a packet or a run reads the few cells of the one value it asks. Documented in `embed.h`.
+
 ## 0.17.0
 
 A construction's identity, kept as a row. A kept ask still read and spliced its program on every ask — 16k cells of a
