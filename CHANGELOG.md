@@ -2,6 +2,28 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.17.0
+
+A construction's identity, kept as a row. A kept ask still read and spliced its program on every ask — 16k cells of a
+SHA-256 stage named twice each, and a node's identity named once each — to spell one thing: ident(root), which with the
+dims and the lens is the root's word. That is a function of the program and the inputs' words (an input is named by its
+leaf's word since 0.16.0), so it is the ask's to keep: for an ask that names no roster, `slate_dag_take_ask` keeps it
+under `word_step(kDoorIdent, {the ask's word})` as a leaf `[ident(root)][check]`, `check =
+word_step(kDoorIdent, {the ask's word, ident(root)})`, the first time the program is spliced over those inputs, for a
+construction whose root alone may answer it (no effect, no refusal). Taken again, the row is read, its check recomputed,
+the root's word spelled from it (CSE-DAG 0.15.0's `kept_ident`) and looked up; kept whole, that is the answer, and
+neither the program nor an input is read. The root is named by its construction as before — the row is its name, kept
+where it can be found without the construction. A row whose check is not this ask's (another ask's row under this
+word, a swapped identity, a torn one) is read as absent: the program is read and spliced as always, and what the splice
+spells is written over it. Nothing else changes and no word does. An ask that names a roster keeps no row — a split
+by prime runs as it did. The shape is stated in `embed.h`.
+
+Why a row and not a mechanism: it is a step's answer kept like any other — the identity of a construction is a
+computation over the program's leaf and the inputs' words, and a computation's answer is a row under a word spelled
+from what it was computed over. A kept training ask through a unit went from 4.7 ms to 0.47 ms end to end on a kept
+HTTPS connection; a kept SHA-256 stage from 4.2 ms to 0.59 ms. A fresh ask pays one read of the row (a miss) and one
+put of it: a fresh block alone 2.54–2.64 CPU-s before, 2.52–2.57 after.
+
 ## 0.16.0
 
 An input an ask names is named by its leaf's word. An input had two names: the leaf's word the ask carries — the name

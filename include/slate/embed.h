@@ -166,9 +166,23 @@ const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uint64_t wn, u
 /// Configure this container from the ask that `word` names, with `primes` as its lens — the share this machine
 /// carries. The ask's leaf is walked out of this container's store (word ‖ 0, word ‖ 1, … to the first cell
 /// nobody has; the records are the count), then the roster it names is set, then the lens (which must be one
-/// share of that roster — a contiguous sub-range), then the program's word and the dims. Nothing is kept here: the ask
-/// names the construction and carries none of it, and the program's own leaf is walked when it is started. A
-/// container configured this way starts with slate_dag_start.
+/// share of that roster — a contiguous sub-range), then the program's word and the dims. The ask names the
+/// construction and carries none of it. A container configured this way starts with slate_dag_start.
+///
+/// Before the program or an input is read, the root is asked. An input is named by its leaf's word, so the root's
+/// word — the grid step over ident(root), the dims and the lens — is a function of the program and the inputs' words.
+/// For an ask that names no roster its identity is kept as a row, the one thing a take keeps:
+///
+///     word  word_step(kDoorIdent, {the ask's word})          kDoorIdent: CSE-Arena's door, kDoorJit + 128
+///     row   a leaf [ident(root)][check],  check = word_step(kDoorIdent, {the ask's word, ident(root)})
+///
+/// written the first time the program is spliced over those inputs (only for a construction its root alone may
+/// answer: no effect, no refusal — DagBuild::keepable), and written again when what is under the word is not what
+/// the splice spelled. Taken again, the row is read, the check recomputed, the root's word spelled from ident(root)
+/// and looked up: kept whole, the root is what the start hands back, and neither the program nor an input is read.
+/// A row whose check is not this ask's — another ask's row, a wrong identity, a torn one — is read as absent. Any
+/// other way the root is not answered changes nothing: the program is read and spliced and the root asked as below,
+/// then the inputs are read side by side and judged in order.
 /// @return NULL; "partial" when the door could gather only part of the ask's leaf — a cell on some carriers
 ///         and not all, which is not an ask yet, never a short one; "args" on a null builder, a null word, a
 ///         word nothing is kept under, bytes that run past the ask's end, a roster the pool's rule refuses,

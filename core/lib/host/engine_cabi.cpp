@@ -923,7 +923,8 @@ extern "C" const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uin
    children's words and a carrier's by its name, never its value — and the root looked up (DagBuild::kept). Kept
    whole, it is what the start that follows hands back; otherwise nothing is set and the tick is dropped. A
    construction that reaches an effect is never answered here: its effects come first, as they always have. */
-static void ask_kept(SlateDag *b) {
+static void ask_kept(SlateDag *b, Slate::Word *ident) {
+  if (ident) ident->clear();
   std::vector<long long> dv;
   if (!run_dims(b, true, nullptr, 0, dv) || b->program_bytes.size() > kFragMaxCount) return;
   SlateDag *t = new (std::nothrow) SlateDag();
@@ -940,6 +941,8 @@ static void ask_kept(SlateDag *b) {
     if (!e && tr >= 0) {
       RunScope scope(b);
       Slate::CtxScope tcs(t->arena);
+      /* the construction's identity, when a root alone may answer it: what take_ask keeps as a row */
+      if (ident && t->build.keepable()) { auto v = t->build.a.ident(tr); ident->assign(v.first, v.first + v.second); }
       Slate::ArrayReading ar = t->build.kept(tr, dv);
       if (ar.buffer()) b->kept_answer.reset(new Slate::ArrayReading(std::move(ar)));
     }
@@ -981,10 +984,36 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   }
   const Slate::Envelope &senv = b->arena.store_env();
   const Slate::Codec &wc = b->arena.env().codec;
+  /* The construction's identity, kept as a row — for an ask that names no roster, the page's. The root's word is
+     the grid step over ident(root), the dims and the lens; ident(root) is a function of the program and the inputs'
+     words alone, so it is kept under word_step(kDoorIdent, {the ask's word}) — the ask's word carries the program's,
+     the inputs' and the dims — as a leaf, the first time a program is spliced over those inputs (below). Asked again,
+     that row is read, the root's word spelled from it, and the root looked up: kept whole, it is the answer, and
+     neither the program nor an input is read. A row the root does not answer from changes nothing: the program is
+     read and spliced as always, and what the splice spells is what is kept. Only a construction a root alone may
+     answer (DagBuild::keepable: no effect, no refusal) is ever given a row. */
+  Slate::Word idkey, idop; std::vector<uint8_t> idrow, idkept;
+  const Slate::Word askw(word, word + wn);
+  /* the row: [ident][check], check = word_step(kDoorIdent, {the ask's word, ident}) — a keyed word binding the
+     identity to this ask, so a row that names another ask's construction (copied from its row, or its identity
+     swapped in) is no row here: it is read as absent, and the program is read and spliced as always */
+  auto check_of = [&](const Slate::Word &id) { return Slate::word_step(wc, idop, {&askw, &id}); };
+  if (rk == 0 && pwn) {
+    Slate::CtxScope cs(b->arena);
+    idop = b->arena.op_word(Slate::Arena::kDoorIdent);
+    idkey = Slate::word_step(wc, idop, {&askw});
+    bool ipart = false;
+    if (Slate::leaf_get(senv, wc, idkey, idkept, ipart) && idkept.size() >= 2 && idkept.size() % 2 == 0) {
+      const size_t h = idkept.size() / 2;
+      const Slate::Word id(idkept.begin(), idkept.begin() + (ptrdiff_t)h), ck(idkept.begin() + (ptrdiff_t)h, idkept.end());
+      if (check_of(id) == ck) idrow.assign(id.begin(), id.end());
+    }
+  }
   /* the program's leaf: nothing under its word, or not whole yet, is what the tick would find — it says so then, as
-     it always has; here the bytes are only carried when the walk found them whole */
+     it always has; here the bytes are only carried when the walk found them whole — read only when the identity row
+     does not answer */
   std::vector<uint8_t> pbytes; bool pok = false, ppart = false;
-  if (pwn) { const Slate::Word pk(prog, prog + pwn); Slate::leaves_get(senv, wc, &pk, 1, &pbytes, &pok, &ppart); }
+  const bool by_row = !idrow.empty();
   /* the roster first, then this machine's own share of it, then what to run and over what. The lens is cleared
      first so an ask always lands on a fresh statement — a container's old primes are not a reason to refuse
      the roster its ask names. */
@@ -998,12 +1027,33 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   b->dims_buf = std::move(dims);
   b->input_words = std::move(iwords);
   b->input_bytes.clear();
+  if (by_row) {
+    std::vector<long long> dv;
+    if (run_dims(b, true, nullptr, 0, dv)) {
+      RunScope scope(b);
+      Slate::ArrayReading ar = b->build.kept_ident(Slate::Word(idrow.begin(), idrow.end()), dv);
+      if (ar.buffer()) { b->kept_answer.reset(new Slate::ArrayReading(std::move(ar))); return nullptr; }
+    }
+  }
+  if (pwn) { const Slate::Word pk(prog, prog + pwn); Slate::leaves_get(senv, wc, &pk, 1, &pbytes, &pok, &ppart); }
   if (pwn && pok) b->program_bytes = std::move(pbytes);
   /* The root, asked before any input is read. An input is named by its leaf's word (run_ticks), so the root's word
      is spelled from the construction and the words the ask carries; the store holding it whole is the answer, and
      the inputs' bytes are never read. Otherwise the inputs are walked, side by side in one walk (leaves_get), and
      judged in order: one the store does not hold, or holds only part of, is not an input yet and the ask is not taken. */
-  if (!b->program_bytes.empty()) ask_kept(b);
+  if (!b->program_bytes.empty()) {
+    Slate::Word spliced;
+    ask_kept(b, rk == 0 ? &spliced : nullptr);
+    /* the identity row: kept the first time a program is spliced over these inputs, and written again when what is
+       kept under its word is not what the splice spelled (the store's row under a word is the later one) */
+    if (rk == 0 && !spliced.empty() && spliced != idrow) {
+      Slate::CtxScope cs(b->arena);
+      std::vector<uint8_t> row(spliced.begin(), spliced.end());
+      const Slate::Word ck = check_of(spliced);
+      row.insert(row.end(), ck.begin(), ck.end());
+      Slate::leaf_put(senv, wc, idkey, row.data(), row.size(), idkept.empty());   /* something else there: write over it */
+    }
+  }
   if (b->kept_answer) return nullptr;
   const size_t ni = b->input_words.size();
   if (ni) {
