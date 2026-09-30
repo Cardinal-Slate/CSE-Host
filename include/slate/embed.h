@@ -157,6 +157,18 @@ int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn);
 ///         allocated.
 int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn);
 
+/// slate_dag_leaf, saying whether the leaf was proven kept whole before this call — every cell of these n bytes read
+/// back (*proven 1) — or kept now (*proven 0). A leaf's whole address holds its length once that proof is on the disk:
+///
+///     word_step(kDoorWhole, {the leaf's word})  →  one row, the length        kDoorWhole: CSE-Arena, kDoorJit + 130
+///
+/// and a later slate_dag_leaf reads it — one read — instead of every cell. slate_dag_leaf_whole writes that row; its
+/// caller calls it only after a proven leaf and only once the store has put what proved it on the disk (a unit syncs
+/// first), so the row never outlives a lost cell. A torn leaf (a cell missing) reads short, is never proven, and never
+/// gets the row; it is kept again.
+int slate_dag_leaf_proven(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn, int *proven);
+int slate_dag_leaf_whole(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t n);
+
 /// Bytes read back, the mirror of slate_dag_leaf: the leaf `word` names, walked out of this container's store to the
 /// first cell nobody has. `*bytes` is malloc'd (the caller frees it with free()).
 /// @return NULL; "args" when nothing is under the word; "partial" when a cell is on some carriers but not all.

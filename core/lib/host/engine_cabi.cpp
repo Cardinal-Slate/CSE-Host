@@ -889,16 +889,45 @@ extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try 
 } catch (...) { return 1; }
 
 /* bytes handed in: the same door as the ask above, with the bytes the caller's */
-extern "C" int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn_out) try {
+/* A leaf's length at its whole address, word_step(kDoorWhole, {the leaf's word}): one row, the length as a number.
+   Written only by slate_dag_leaf_whole, which the caller calls once the leaf was proven kept (every cell read back,
+   n bytes) and what proved it is on the disk; read by a writer to learn "already kept, whole" in one read. */
+static Slate::Word whole_key(SlateDag *b, const Slate::Word &key) {
+  return Slate::word_step(b->arena.env().codec, b->arena.op_word(Slate::Arena::kDoorWhole), {&key});
+}
+static int64_t whole_of(SlateDag *b, const Slate::Word &key) {
+  bool neg = false; std::vector<uint8_t> num, den;
+  if (!Slate::read_pair(b->arena.store_env().codec, whole_key(b, key), {}, 0, 1, neg, num, den) || neg || num.size() > 8 || den != std::vector<uint8_t>{1}) return -1;
+  int64_t v = 0; for (size_t i = num.size(); i-- > 0;) v = (v << 8) | num[i];
+  return v;
+}
+extern "C" int slate_dag_leaf_proven(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn_out,
+                                     int *proven) try {
+  if (proven) *proven = 0;
   if (!b || !bytes || !n || !word || !wn_out) return 1;
   const Slate::Word key = b->arena.leaf_key(bytes, (size_t)n);
-  if (key.empty() || !Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, bytes, (size_t)n))
-    return 1;
+  if (key.empty()) return 1;
+  /* kept whole, as its whole address says: one read, and no cell is read */
+  if (whole_of(b, key) != (int64_t)n) {
+    /* else read it back: every cell of these n bytes there is proof it is kept whole (a torn leaf reads short — the
+       first cell nobody has is its end — and is kept again); otherwise its cells are kept now */
+    std::vector<uint8_t> have; bool partial = false;
+    if (Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, key, have, partial) && have.size() == n) { if (proven) *proven = 1; }
+    else if (!Slate::leaf_put(b->arena.store_env(), b->arena.env().codec, key, bytes, (size_t)n, false)) return 1;
+  }
   uint8_t *o = (uint8_t *)std::malloc(key.size());
   if (!o) return 1;
   std::memcpy(o, key.data(), key.size());
   *word = o; *wn_out = (uint64_t)key.size();
   return 0;
+} catch (...) { return 1; }
+extern "C" int slate_dag_leaf(SlateDag *b, const uint8_t *bytes, uint64_t n, uint8_t **word, uint64_t *wn_out) {
+  return slate_dag_leaf_proven(b, bytes, n, word, wn_out, nullptr);
+}
+extern "C" int slate_dag_leaf_whole(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t n) try {
+  if (!b || !word || !wn || !n || n > (uint64_t)INT64_MAX) return 1;
+  const Slate::Word key(word, word + wn);
+  return Slate::row_put(b->arena.store_env().codec, whole_key(b, key), Slate::row_of_i64(Slate::lens_for_bits(64), (int64_t)n)) ? 0 : 1;
 } catch (...) { return 1; }
 
 /* Bytes kept under a name in a scope: a leaf under word_step(kDoorEntry, {the scope, word_of(name)}), through this

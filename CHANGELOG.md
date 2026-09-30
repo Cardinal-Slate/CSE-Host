@@ -2,6 +2,18 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.20.0
+
+A leaf's whole address. `slate_dag_leaf_proven` is `slate_dag_leaf` saying whether the leaf was proven kept whole
+before the call — every cell of its bytes read back — and it reads the leaf's whole address first, `word_step(kDoorWhole,
+{the leaf's word})`: when that holds the length, the leaf is kept, one read, no cell read. `slate_dag_leaf_whole` writes
+that row. Why: "already kept, whole" was a read of every cell — a 32 KB table is 8,192 — each time a page's session kept
+bytes the store already held. Only the reading back proves it, so only a keep that read every cell back may be followed
+by the row, and only its caller knows when what it read is on the disk (CSE-Core's `seam/leaf_whole.h`: the store is
+synced first when any put may not be, then the row) — so the row never outlives a lost cell. A leaf kept just now is
+not proven; a torn one (a cell missing) reads short, is kept again, and gets no row. `slate_dag_leaf` is
+`slate_dag_leaf_proven` without the answer, and writes no row. Documented in `embed.h`.
+
 ## 0.19.0
 
 `slate_dag_take_ask_read(b, word, wn, bytes, n, primes, k)`: take an ask whose bytes the caller has already read at
