@@ -201,6 +201,11 @@ const char *slate_dag_named_read(SlateDag *b, const uint8_t *scope, uint64_t sn,
 ///         word nothing is kept under, bytes that run past the ask's end, a roster the pool's rule refuses,
 ///         or `primes` that are not one share of the ask's roster.
 const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint64_t wn, const int64_t *primes, uint32_t k);
+/// slate_dag_take_ask with the ask's bytes already read under `word` (slate_dag_leaf_read) by a caller that reads an
+/// ask before taking it — the grant of its program, say — so the ask's leaf is not walked twice. `bytes` must be what
+/// the store holds under `word`; the word is still the ask's name (its identity row is kept under it).
+const char *slate_dag_take_ask_read(SlateDag *b, const uint8_t *word, uint64_t wn, const uint8_t *bytes, uint64_t n,
+                                    const int64_t *primes, uint32_t k);
 
 /// Run the ask that `word` names on the share `primes`: take it, start the program it names over the dims it
 /// carries, and hand back the root reading's own word (*root/*rn, malloc'd; free() it) — the key the root's

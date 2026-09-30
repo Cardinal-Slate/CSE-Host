@@ -991,7 +991,15 @@ extern "C" const char *slate_dag_take_ask(SlateDag *b, const uint8_t *word, uint
   bool partial = false;
   if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, Slate::Word(word, word + wn), ask, partial))
     return partial ? "partial" : "args";
-  const uint64_t n = (uint64_t)ask.size();
+  return slate_dag_take_ask_read(b, word, wn, ask.data(), (uint64_t)ask.size(), primes, k);
+} catch (...) { return "internal"; }
+
+/* the same, the ask's bytes as the caller read them under `word` (slate_dag_leaf_read): a caller that reads an ask
+   to learn its program's grant before taking it does not have it read again */
+extern "C" const char *slate_dag_take_ask_read(SlateDag *b, const uint8_t *word, uint64_t wn, const uint8_t *bytes,
+                                               uint64_t n, const int64_t *primes, uint32_t k) try {
+  if (!b || !word || !wn || !bytes || !n || (k && !primes)) return "args";
+  const std::vector<uint8_t> ask(bytes, bytes + n);
   AskRd r{ ask.data(), n, 0 };
   uint32_t rk = 0, ndims = 0;
   /* a count is only believed as far as the bytes behind it go: an ask that names more primes or dims than it

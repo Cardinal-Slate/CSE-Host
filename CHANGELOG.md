@@ -2,6 +2,13 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.19.0
+
+`slate_dag_take_ask_read(b, word, wn, bytes, n, primes, k)`: take an ask whose bytes the caller has already read at
+its address. A unit reads an ask to learn its program's grant before it takes it, and `slate_dag_take_ask` then
+walked the same leaf out of the store a second time — a third of what a kept ask cost the unit. The word is still
+passed: it is the ask's address, and the address its identity is kept at. `slate_dag_take_ask` is the read, then this.
+
 ## 0.18.0
 
 Bytes kept under a name in a scope: `slate_dag_named_put(b, scope, sn, name, nn, bytes, n)` and
