@@ -12,7 +12,7 @@ bytes the store already held. Only the reading back proves it, so only a keep th
 by the row, and only its caller knows when what it read is on the disk (CSE-Core's `seam/leaf_whole.h`: the store is
 synced first when any put may not be, then the row) — so the row never outlives a lost cell. A leaf kept just now is
 not proven; a torn one (a cell missing) reads short, is kept again, and gets no row. `slate_dag_leaf` is
-`slate_dag_leaf_proven` without the answer, and writes no row. Documented in `embed.h`.
+`slate_dag_leaf_proven` without the answer, and writes no row. (The unit gives a row only to a leaf of a kilobyte or more.) Documented in `embed.h`.
 
 ## 0.19.0
 
