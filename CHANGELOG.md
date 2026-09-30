@@ -2,6 +2,21 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.21.0
+
+An ask's input is read when the run's loads need it. `take_ask` reads an input's whole address (`kDoorWhole`); one of a
+kilobyte or more (`kDemandMin`, the whole address's own floor) is not read before the run: the tick binds it with
+`lower_register_carrier_demand`, and each load reads the piece it touches, by address (CSE-Arena's `LeafDemand`,
+CSE-DAG's lanes). The rest are read whole as before, side by side in one walk. A fresh SHA-256 block's asks made
+3,039,679 store reads; now 538,920 (6,158 table pieces read of the tables' ~1.7M cells). An ask that names a roster
+reads its share as it did.
+
+A change: a leaf proven whole and then missing a cell refuses only a run that loads that cell. Before, the ask over it
+was refused when taken; now a run whose loads never reach the missing piece answers, and one that reaches it refuses —
+never a value. The store is the only memory, and a load reads its row when it needs it.
+
+A fragment saved from a container reads a carrier read by address whole first.
+
 ## 0.20.1
 
 `slate_dag_leaf_proven` says how it knows: the whole address (0), every cell read back (1), or every cell put by this

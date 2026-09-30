@@ -125,6 +125,9 @@ struct SlateDag {
   /* the program's inputs, in its holes' order: each a leaf, named by its word the way a step names its operands,
      and its bytes as the leaf read back. The first program a start runs is spliced with them. */
   std::vector<std::vector<uint8_t>> input_words, input_bytes;
+  /* an input read by address as the run's loads touch it — its whole address gives its length — that length; 0 for
+     one read whole into input_bytes. The ask's own scratch, like the bytes. */
+  std::vector<uint64_t> input_demand;
   /* the program's bytes, when take_ask walked its leaf beside the inputs: read by the first tick of the start that
      follows and dropped with it — the ask's own scratch, not a thing kept; empty otherwise, and the tick walks the leaf */
   std::vector<uint8_t> program_bytes;
@@ -697,7 +700,11 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
     if (bind_inputs)
       for (size_t i = 0; i < b->input_bytes.size(); i++) {
         const std::vector<uint8_t> &bytes = b->input_bytes[i];
-        if (i < b->input_words.size() && !b->input_words[i].empty())
+        if (i < b->input_demand.size() && b->input_demand[i] && i < b->input_words.size() && !b->input_words[i].empty())
+          /* its cells read by address, a piece when a load first touches it (CSE-Arena's LeafDemand) */
+          in.push_back(t->build.a.lower_register_carrier_demand(Slate::Word(b->input_words[i].begin(), b->input_words[i].end()),
+                                                                (size_t)b->input_demand[i]));
+        else if (i < b->input_words.size() && !b->input_words[i].empty())
           in.push_back(t->build.a.lower_register_carrier_ident(wbuf_from_bytes(bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()),
                                                                 Slate::bytes_buffer(b->input_words[i].data(), b->input_words[i].size())));
         else in.push_back(slate_dag_carrier_bytes(t, bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()));
@@ -892,6 +899,9 @@ extern "C" int slate_dag_ask(SlateDag *b, uint8_t **word, uint64_t *wn_out) try 
 /* A leaf's length at its whole address, word_step(kDoorWhole, {the leaf's word}): one row, the length as a number.
    Written only by slate_dag_leaf_whole, which the caller calls once the leaf was proven kept (every cell read back,
    n bytes) and what proved it is on the disk; read by a writer to learn "already kept, whole" in one read. */
+/* an input this long or longer, with its whole address, is read by address as the run's loads touch it: the floor the
+   whole address itself has (a shorter leaf gets no whole row, LEAF_WHOLE_MIN in the seam) */
+static constexpr uint64_t kDemandMin = 1024;
 static Slate::Word whole_key(SlateDag *b, const Slate::Word &key) {
   return Slate::word_step(b->arena.env().codec, b->arena.op_word(Slate::Arena::kDoorWhole), {&key});
 }
@@ -1125,14 +1135,26 @@ extern "C" const char *slate_dag_take_ask_read(SlateDag *b, const uint8_t *word,
   }
   if (b->kept_answer) return nullptr;
   const size_t ni = b->input_words.size();
+  b->input_demand.assign(ni, 0);
   if (ni) {
-    std::vector<Slate::Word> keys(ni); std::vector<std::vector<uint8_t>> got(ni);
-    std::unique_ptr<bool[]> ok(new bool[ni]()), part(new bool[ni]());
-    for (size_t i = 0; i < ni; i++) keys[i] = Slate::Word(b->input_words[i].begin(), b->input_words[i].end());
-    Slate::leaves_get(senv, wc, keys.data(), ni, got.data(), ok.get(), part.get());
-    for (size_t i = 0; i < ni; i++)
-      if (!ok[i]) { std::vector<uint8_t>().swap(b->program_bytes); return part[i] ? "partial" : "args"; }
-    b->input_bytes = std::move(got);
+    /* An input whose whole address holds its length — a leaf of a kilobyte or more, proven kept whole — is not read
+       here: the run's loads read the pieces they touch, by address, when they touch them. The rest are read whole,
+       side by side in one walk, and judged in order. Only for an ask that names no roster: a split by prime reads its
+       share as it did. */
+    std::vector<size_t> rd;
+    for (size_t i = 0; i < ni; i++) {
+      const Slate::Word key(b->input_words[i].begin(), b->input_words[i].end());
+      const int64_t len = rk == 0 ? whole_of(b, key) : -1;
+      if (len >= (int64_t)kDemandMin) b->input_demand[i] = (uint64_t)len; else rd.push_back(i);
+    }
+    std::vector<Slate::Word> keys(rd.size()); std::vector<std::vector<uint8_t>> got(rd.size());
+    std::unique_ptr<bool[]> ok(new bool[rd.size() + 1]()), part(new bool[rd.size() + 1]());
+    for (size_t j = 0; j < rd.size(); j++) keys[j] = Slate::Word(b->input_words[rd[j]].begin(), b->input_words[rd[j]].end());
+    if (!rd.empty()) Slate::leaves_get(senv, wc, keys.data(), rd.size(), got.data(), ok.get(), part.get());
+    for (size_t j = 0; j < rd.size(); j++)
+      if (!ok[j]) { std::vector<uint8_t>().swap(b->program_bytes); return part[j] ? "partial" : "args"; }
+    b->input_bytes.assign(ni, std::vector<uint8_t>());
+    for (size_t j = 0; j < rd.size(); j++) b->input_bytes[rd[j]] = std::move(got[j]);
   }
   return nullptr;
 } catch (...) { return "internal"; }
@@ -1473,6 +1495,7 @@ extern "C" const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const 
     int idx = (int)carriers.size();
     ctab[cid] = idx;
     carriers.push_back(FragCarrier{});                     /* placeholder: keep idx stable across recursion */
+    if (!b->arena.lower_carrier_whole(cid)) { cerr = true; return -1; }   /* a carrier read by address: its cells, whole */
     const Slate::WBuffer &w = *cs[cid];
     FragCarrier fc{};
     fc.domain = w.is_rns() ? 2 : 1;
