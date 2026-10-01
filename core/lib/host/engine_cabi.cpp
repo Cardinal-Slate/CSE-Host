@@ -704,9 +704,9 @@ static Slate::ArrayReading run_ticks(SlateDag *b, std::vector<uint8_t> cur, cons
           /* its cells read by address, a piece when a load first touches it (CSE-Arena's LeafDemand) */
           in.push_back(t->build.a.lower_register_carrier_demand(Slate::Word(b->input_words[i].begin(), b->input_words[i].end()),
                                                                 (size_t)b->input_demand[i]));
-        else if (i < b->input_words.size() && !b->input_words[i].empty())
-          in.push_back(t->build.a.lower_register_carrier_ident(wbuf_from_bytes(bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()),
-                                                                Slate::bytes_buffer(b->input_words[i].data(), b->input_words[i].size())));
+        else if (i < b->input_words.size() && !b->input_words[i].empty())   /* a leaf's bytes, named by the leaf's word */
+          in.push_back(t->build.a.lower_register_carrier_leaf(wbuf_from_bytes(bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()),
+                                                               Slate::Word(b->input_words[i].begin(), b->input_words[i].end()), (uint64_t)bytes.size()));
         else in.push_back(slate_dag_carrier_bytes(t, bytes.empty() ? nullptr : bytes.data(), (uint64_t)bytes.size()));
       }
     bind_inputs = false;
@@ -1005,7 +1005,7 @@ static void ask_kept(SlateDag *b, Slate::Word *ident) {
   if (f) {
     const std::shared_ptr<const Slate::WBuffer> none = std::make_shared<const Slate::WBuffer>((size_t)1, 1);
     std::vector<uint32_t> in;
-    for (const auto &w : b->input_words) in.push_back(t->build.a.lower_register_carrier_ident(none, Slate::bytes_buffer(w.data(), w.size())));
+    for (const auto &w : b->input_words) in.push_back(t->build.a.lower_register_carrier_leaf(none, Slate::Word(w.begin(), w.end()), 0));
     int32_t tr = -1;
     const char *e = slate_dag_splice(t, f, in.empty() ? nullptr : in.data(), (uint32_t)in.size(), &tr);
     slate_frag_free(f);
@@ -1013,7 +1013,8 @@ static void ask_kept(SlateDag *b, Slate::Word *ident) {
       RunScope scope(b);
       Slate::CtxScope tcs(t->arena);
       /* the construction's identity, when a root alone may answer it: what take_ask keeps as a row */
-      if (ident && t->build.keepable()) { auto v = t->build.a.ident(tr); ident->assign(v.first, v.first + v.second); }
+      /* (not for a root that is one of its parts: it is answered by the part, and writes nothing — no identity row) */
+      if (ident && t->build.keepable() && t->build.part_of(tr, dv) < 0) { auto v = t->build.a.ident(tr); ident->assign(v.first, v.first + v.second); }
       Slate::ArrayReading ar = t->build.kept(tr, dv);
       if (ar.buffer()) b->kept_answer.reset(new Slate::ArrayReading(std::move(ar)));
     }

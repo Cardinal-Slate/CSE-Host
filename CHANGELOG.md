@@ -2,6 +2,14 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.22.0
+
+An ask's input is bound as a leaf's bytes (`lower_register_carrier_leaf`), with its length when the run holds it and as
+a stand-in when the ask is answered before any input is read; a construction whose root is a part (CSE-DAG 0.17) keeps
+no identity row — it is answered by the part, and writes nothing. So the page's identity program over a leaf answers the
+leaf's bytes under the leaf's word and keeps nothing beyond the ask's own leaf: "once a byte exists somewhere it exists
+and you don't rewrite it."
+
 ## 0.21.0
 
 An ask's input is read when the run's loads need it. `take_ask` reads an input's whole address (`kDoorWhole`); one of a
