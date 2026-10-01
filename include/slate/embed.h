@@ -287,6 +287,16 @@ const char *slate_dag_effect_host(SlateDag *b,
     int (*perform)(const char *cls, const uint8_t *req, uint64_t reqn, uint8_t **out, uint64_t *outn, void *user),
     int (*begin)(const char *cls, const uint8_t *req, uint64_t reqn, void *slot, void *user), void *user);
 
+/// One performer. Under a roster an effect's answer is a row like any other, its word carrying the roster, and one
+/// share carries it: the share holding the prime the rule names for that word (roster[word mod k], CSE-Effect
+/// effect_carries). That share performs, keeps the answer — sliced across the shares like any leaf — and calls
+/// `wake(cls, word, wn, user)`. Every other share never performs: on a miss it calls `wait(cls, word, wn, user)` and
+/// looks again when it returns 0, or refuses the effect when it returns nonzero. `user` is the host's
+/// (slate_dag_effect_host). Without `wait` every share performs on a miss, as before. Set after the host.
+const char *slate_dag_effect_shares(SlateDag *b,
+    int (*wait)(const char *cls, const uint8_t *word, uint64_t wn, void *user),
+    void (*wake)(const char *cls, const uint8_t *word, uint64_t wn, void *user));
+
 /// Build an effect node: `cls` (the class, by name), static request params [blob, blob+blen) interpreted by
 /// the host, and `nargs` computed-argument child node ids (each forced to a value at resolve time and folded
 /// into the request). Returns the node id, or -1 on bad args.

@@ -2,6 +2,13 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.23.0
+
+`slate_dag_effect_shares(b, wait, wake)`: the one-performer hooks (CSE-Effect 0.10). Under a roster an effect's answer
+is a row with one carrier, the share holding the prime the rule names for its word; that share performs, keeps the
+answer and calls `wake(cls, word, wn, user)`; every other share, on a miss, calls `wait(cls, word, wn, user)` and looks
+again on 0, or refuses the effect on nonzero — it never performs it. `user` is the host's (`slate_dag_effect_host`).
+
 ## 0.22.0
 
 An ask's input is bound as a leaf's bytes (`lower_register_carrier_leaf`), with its length when the run holds it and as

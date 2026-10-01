@@ -382,6 +382,16 @@ extern "C" const char *slate_dag_effect_host(SlateDag *b,
   b->arena.env().effect_host = (perform || begin) ? &b->effect_host : nullptr;
   return nullptr;
 }
+/* One performer (CSE-Arena EffectHost wait/wake): how a share that does not carry an effect's answer waits for the
+   share that does, and how that share says it kept one. Both reach the host's own `user`. */
+extern "C" const char *slate_dag_effect_shares(SlateDag *b,
+    int (*wait)(const char *, const uint8_t *, uint64_t, void *),
+    void (*wake)(const char *, const uint8_t *, uint64_t, void *)) {
+  if (!b) return "args";
+  b->effect_host.wait = wait;
+  b->effect_host.wake = wake;
+  return nullptr;
+}
 /* Build an effect node: class `cls` (by name), static request params [blob, blob+blen), and `nargs`
  * computed-argument child node ids (forced to values at resolve time). Returns the node id, or -1 on bad args
  * (poisons the builder). */
