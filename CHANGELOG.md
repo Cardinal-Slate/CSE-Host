@@ -2,6 +2,14 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.24.0
+
+The identity row of an ask's construction (`kDoorIdent`) is kept for an ask that names a roster too, as for one that
+names none: its word then carries the roster in the clear, as a kept leaf's does, so the fleet keeps one row, placed by
+the rule, which every place that runs a share reads; the root it names is read through the door, whole or not the
+answer. An ask that names no roster keeps the word it had. A kept roster ask is then one read anywhere — the program is not read, nor
+spliced. The page's training asked again on a fleet of two went 335 ms → 3 ms (main: 2 ms).
+
 ## 0.23.0
 
 `slate_dag_effect_shares(b, wait, wake)`: the one-performer hooks (CSE-Effect 0.10). Under a roster an effect's answer

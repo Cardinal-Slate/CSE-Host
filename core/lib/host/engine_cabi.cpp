@@ -1074,7 +1074,9 @@ extern "C" const char *slate_dag_take_ask_read(SlateDag *b, const uint8_t *word,
   }
   const Slate::Envelope &senv = b->arena.store_env();
   const Slate::Codec &wc = b->arena.env().codec;
-  /* The construction's identity, kept as a row — for an ask that names no roster, the page's. The root's word is
+  /* The construction's identity, kept as a row — for any ask, one that names a roster too: then its word carries the
+     roster, as a kept leaf's does, so the fleet keeps one row placed by the rule and every place that runs a share reads
+     it, and the root it names is read through the door, whole or not the answer (kept_ident). The root's word is
      the grid step over ident(root), the dims and the lens; ident(root) is a function of the program and the inputs'
      words alone, so it is kept under word_step(kDoorIdent, {the ask's word}) — the ask's word carries the program's,
      the inputs' and the dims — as a leaf, the first time a program is spliced over those inputs (below). Asked again,
@@ -1088,10 +1090,15 @@ extern "C" const char *slate_dag_take_ask_read(SlateDag *b, const uint8_t *word,
      identity to this ask, so a row that names another ask's construction (copied from its row, or its identity
      swapped in) is no row here: it is read as absent, and the program is read and spliced as always */
   auto check_of = [&](const Slate::Word &id) { return Slate::word_step(wc, idop, {&askw, &id}); };
-  if (rk == 0 && pwn) {
+  if (pwn) {
     Slate::CtxScope cs(b->arena);
     idop = b->arena.op_word(Slate::Arena::kDoorIdent);
-    idkey = Slate::word_step(wc, idop, {&askw});
+    if (rk == 0) idkey = Slate::word_step(wc, idop, {&askw});
+    else {                                       /* on the roster: one row for the fleet, placed by the rule like any leaf */
+      std::vector<uint8_t> rec = Slate::lens_prefix(roster);
+      rec.insert(rec.end(), idop.begin(), idop.end()); rec.insert(rec.end(), askw.begin(), askw.end());
+      idkey = Slate::word_of(wc, rec);
+    }
     bool ipart = false;
     if (Slate::leaf_get(senv, wc, idkey, idkept, ipart) && idkept.size() >= 2 && idkept.size() % 2 == 0) {
       const size_t h = idkept.size() / 2;
@@ -1133,10 +1140,10 @@ extern "C" const char *slate_dag_take_ask_read(SlateDag *b, const uint8_t *word,
      judged in order: one the store does not hold, or holds only part of, is not an input yet and the ask is not taken. */
   if (!b->program_bytes.empty()) {
     Slate::Word spliced;
-    ask_kept(b, rk == 0 ? &spliced : nullptr);
+    ask_kept(b, &spliced);
     /* the identity row: kept the first time a program is spliced over these inputs, and written again when what is
        kept under its word is not what the splice spelled (the store's row under a word is the later one) */
-    if (rk == 0 && !spliced.empty() && spliced != idrow) {
+    if (!spliced.empty() && spliced != idrow) {
       Slate::CtxScope cs(b->arena);
       std::vector<uint8_t> row(spliced.begin(), spliced.end());
       const Slate::Word ck = check_of(spliced);
