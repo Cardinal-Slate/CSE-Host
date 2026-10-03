@@ -423,10 +423,19 @@ extern "C" const char *slate_dag_codec(SlateDag *b,
   if (!b || (!secret && sn)) return "args";
   Slate::Codec &c = b->arena.env().codec;
   c.encode = encode; c.decode = decode; c.put = put;
+  c.put_many = nullptr; c.get_many = nullptr;          /* a batch belongs to the put and decode it was set beside */
   c.secret = sn ? std::make_shared<const Slate::WBuffer>(Slate::bytes_buffer(secret, (size_t)sn)) : nullptr;
   c.user = user;
   return nullptr;
 } catch (const std::bad_alloc &) { return "nomem"; }
+extern "C" const char *slate_dag_codec_many(SlateDag *b,
+    int (*put_many)(uint64_t, const uint8_t *, const uint64_t *, const uint8_t *, const uint64_t *, const uint8_t *, uint64_t, void *),
+    int (*get_many)(uint64_t, const uint8_t *, const uint64_t *, const uint8_t *, uint64_t, uint8_t **, uint64_t *, int *, void *)) {
+  if (!b) return "args";
+  Slate::Codec &c = b->arena.env().codec;
+  c.put_many = put_many; c.get_many = get_many;
+  return nullptr;
+}
 extern "C" const char *slate_dag_effect_host_io(SlateDag *b,
     int (*perform)(const char *, const uint8_t *, uint64_t, const SlateOperand *, uint32_t, uint8_t **, uint64_t *, void *),
     void *user) {
@@ -1538,7 +1547,7 @@ extern "C" const char *slate_dag_save_fragment(SlateDag *b, int32_t root, const 
     } else {
       fc.is_hole = is_declared_hole(cid) ? 1 : 0;
       if (!fc.is_hole) {
-        if (w.is_rns() || w.is_f32() || w.width() > 8) { cerr = true; return -1; }   /* only positional int can bake */
+        if (w.is_rns() || (!w.is_f32() && w.width() > 8)) { cerr = true; return -1; }   /* only machine integers can bake (the float32 rung holds exact ones) */
         fc.data.resize(w.size());
         for (size_t i = 0; i < w.size(); i++) fc.data[i] = w.get(i);
       }

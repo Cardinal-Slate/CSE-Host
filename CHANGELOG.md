@@ -2,6 +2,15 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.25.0
+
+`slate_dag_codec_many(b, put_many, get_many)`: the store's batches beside the three callbacks `slate_dag_codec` sets
+(which now clears them: they belong to the put and decode set there). A region with them keeps and reads a step's rows
+and a reading's cells a batch at a time (CSE-DAG 0.19, CSE-Arena 0.26) — the same rows under the same words.
+
+A fragment bakes a carrier on the device's float32 rung as the integers it holds (it refused it: a run under the device
+whose result fed a fragment could not be saved).
+
 ## 0.24.0
 
 The identity row of an ask's construction (`kDoorIdent`) is kept for an ask that names a roster too, as for one that

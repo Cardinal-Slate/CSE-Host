@@ -88,6 +88,17 @@ const char *slate_dag_codec(SlateDag *b,
     int (*decode)(const uint8_t *word, uint64_t wn, const uint8_t *secret, uint64_t sn, uint8_t **out, uint64_t *outn, void *user),
     int (*put)(const uint8_t *word, uint64_t wn, const uint8_t *bytes, uint64_t n, const uint8_t *secret, uint64_t sn, void *user),
     const uint8_t *secret, uint64_t sn, void *user);
+/// The store's batches beside the three above, for a store that keeps or reads a grid's rows for less than a call a
+/// row: `put_many` keeps n rows under n words, `get_many` reads n words — the words end to end with n+1 offsets, the
+/// rows likewise, row i's answer in rcs[i] as decode would answer it, the rows found in one malloc'd *rows the engine
+/// frees (CSE-Store's cse_store_put_many_fn / cse_store_get_many_fn). The same rows under the same words as n calls
+/// of put or decode — only fewer calls. Either may be null: those rows go one call each. Handed the same `user` and
+/// secret as the three; set after slate_dag_codec, which clears them (they belong to the put and decode set there).
+const char *slate_dag_codec_many(SlateDag *b,
+    int (*put_many)(uint64_t n, const uint8_t *words, const uint64_t *woff, const uint8_t *rows, const uint64_t *roff,
+                    const uint8_t *secret, uint64_t sn, void *user),
+    int (*get_many)(uint64_t n, const uint8_t *words, const uint64_t *woff, const uint8_t *secret, uint64_t sn,
+                    uint8_t **rows, uint64_t *roff, int *rcs, void *user));
 
 /* ---- leaves: the binaries and the grid ---- */
 
