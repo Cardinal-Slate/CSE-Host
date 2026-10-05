@@ -2,6 +2,15 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.27.0
+
+The owner: "what a machine has is configuration"; "seams only for hardware and wires"; the engine is arithmetic over rows, its floor the language runtime and threads.
+
+- The C ABI touches no machine. It included `<unistd.h>` and CSE-Platform's `providers/host/io.hpp`, bound the host's
+  providers itself and called `::read`, `::write`, `::close` and `::accept`. It now calls the weak
+  `slate_install_io_providers` (default: nothing bound — every open and every verb refuses, a container with no host)
+  and moves bytes through the container's `HostIo`; ownership, the descriptor cap and the cancel gate stay here.
+
 ## 0.26.0
 
 The owner: "depending on what is available on device, it's basically a configuration. if gpu network is available we use this, whatever. we do this for all gpus. we have cpu stuff and do everything for gpu as well."

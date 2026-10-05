@@ -9,8 +9,7 @@
 // contracts live on those declarations.
 #include <functional>
 #include <thread>
-#include <unistd.h>      /* the engine's built-in fd byte-stream: read/write/close */
-#include "slate/providers/host/io.hpp"   /* the file/tcp open providers + install_io_providers() */
+#include "slate/engine/providers.hpp"   /* the registry, the grant and the fd table; the providers are the composition's */
 #include "slate/engine/engine.hpp"
 #include "slate/engine/ops.hpp"
 #include "slate/slate.h"
@@ -44,6 +43,10 @@ static const Slate::FragOps *engine_frag_ops();
  * the fd it names arrives resolved in the context (the engine keeps the table; the fd never enters a word).
  * ----
  *   op = blob[0]: read (chunk=blob[1..4]) -> bytes read; write (ops[1]=data) -> count(8 LE); close -> 0(8 LE). */
+/* the composition's providers and the calls on what they open (slate/engine/providers.hpp): none linked, none bound —
+   every open refuses and every verb refuses, a container with no host. The provider config a setup links defines it. */
+__attribute__((weak)) void Slate::slate_install_io_providers(Slate::ProviderRegistry &, Slate::HostIo &) {}
+
 static inline uint8_t sl_opbyte(const SlateOperand *o, uint64_t i) {
   return ((const uint8_t *)o->plane)[i * (o->elem_bytes ? o->elem_bytes : 1)];
 }
@@ -52,7 +55,8 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
   (void)cls;
   if (blen < 1 || nops < 1 || !ops[0].plane) return 1;
   Slate::IoStreamCtx *ctx = static_cast<Slate::IoStreamCtx *>(user);   /* scoped ram store + cancel gate + the fd */
-  if (!ctx || ctx->fd < 0) return 1;
+  if (!ctx || ctx->fd < 0 || !ctx->fds) return 1;
+  const Slate::HostIo &io = ctx->fds->io;                                /* the composition's calls on the fd */
   int64_t fd = ctx->fd;
   auto ret8 = [&](int64_t v) -> int {
     uint8_t *o = (uint8_t *)std::malloc(8); if (!o) return 1;
@@ -75,21 +79,22 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
     if (rn < 4) return 1;
     uint32_t chunk = (uint32_t)rest[0] | ((uint32_t)rest[1] << 8) | ((uint32_t)rest[2] << 16) | ((uint32_t)rest[3] << 24);
     if (chunk == 0 || chunk > (1u << 30)) return 1;
-    if (gate()) return 1;                                        /* cancelled at the boundary */
+    if (!io.read || gate()) return 1;                            /* no call to make, or cancelled at the boundary */
     uint8_t *buf = (uint8_t *)std::malloc(chunk); if (!buf) return 1;
-    ssize_t r = ::read((int)fd, buf, chunk); if (r < 0) { std::free(buf); return 1; }
+    const int64_t r = io.read((int)fd, buf, chunk); if (r < 0) { std::free(buf); return 1; }
     *out = buf; *outn = (uint64_t)r; return 0;
   }
   if (is_write) {
     if (nops < 2) return 1;
-    if (gate()) return 1;                                        /* cancelled at the boundary */
+    if (!io.write || gate()) return 1;                           /* no call to make, or cancelled at the boundary */
     uint64_t n = ops[1].n; uint8_t *tmp = (uint8_t *)std::malloc(n ? n : 1); if (!tmp) return 1;
     for (uint64_t i = 0; i < n; i++) tmp[i] = sl_opbyte(&ops[1], i);
-    ssize_t w = ::write((int)fd, tmp, (size_t)n); std::free(tmp); if (w < 0) return 1;
+    const int64_t w = io.write((int)fd, tmp, (size_t)n); std::free(tmp); if (w < 0) return 1;
     return ret8((int64_t)w);
   }
   if (is_close) {
-    ::close((int)fd);
+    if (!io.close) return 1;
+    io.close((int)fd);
     if (ctx && ctx->fds) {                                       /* release the fd-cap slot and drop ownership */
       if (ctx->fds->open_host_fds > 0) ctx->fds->open_host_fds--;
       ctx->fds->owned_fds.erase((int)fd);
@@ -97,11 +102,11 @@ static int builtin_io_stream(const char *cls, const uint8_t *blob, uint64_t blen
     return ret8(0);
   }
   if (is_accept) {                                             /* a new client fd off a listening fd */
-    if (gate()) return 1;                                      /* cancelled at the boundary */
-    int c = ::accept((int)fd, nullptr, nullptr);               /* the wire holds it until a client comes */
+    if (!io.accept || gate()) return 1;                        /* no call to make, or cancelled at the boundary */
+    int c = io.accept((int)fd);                                /* the wire holds it until a client comes */
     if (c < 0) return 1;
     if (ctx && ctx->fds) {                                     /* the accepted client fd counts against the cap + is owned */
-      if (ctx->fds->open_host_fds >= ctx->fds->host_fd_cap) { ::close(c); return 1; }
+      if (ctx->fds->open_host_fds >= ctx->fds->host_fd_cap) { if (io.close) io.close(c); return 1; }
       ctx->fds->open_host_fds++;
       ctx->fds->owned_fds.insert(c);
     }
@@ -143,7 +148,7 @@ struct SlateDag {
        gated by io_policy (the compose grant — which paths are mounted, which endpoints exposed); once open returns
        an fd the engine moves bytes on it itself (read/write/close) via the built-in byte-stream. io_policy starts
        empty (fail-closed: every open refuses until a compose spec grants a mount or a port). */
-    Slate::install_io_providers(providers);   /* bind the available ways into this container's own registry, not a global */
+    Slate::slate_install_io_providers(providers, fds.io);   /* the composition's ways, into this container's own registry */
     arena.env().io_policy = &io_policy;
     arena.env().fds = &fds;
     arena.env().providers = &providers;
