@@ -100,6 +100,15 @@ const char *slate_dag_codec_many(SlateDag *b,
     int (*get_many)(uint64_t n, const uint8_t *words, const uint64_t *woff, const uint8_t *secret, uint64_t sn,
                     uint8_t **rows, uint64_t *roff, int *rcs, void *user));
 
+/// A grid of records named at once, beside the encode set by slate_dag_codec, for a codec that names a batch for less
+/// than a call a record (the keyed hash on a device): `encode_many` names n records end to end (n+1 offsets), its words
+/// in one malloc'd *words the engine frees, laid end to end with woff (the engine's n+1) — the words n calls of encode
+/// make; 0, or nonzero and the engine names those records one at a time. Null names every record one call each, as
+/// before. Handed the same `user` and secret; set after slate_dag_codec, which clears it.
+const char *slate_dag_codec_names(SlateDag *b,
+    int (*encode_many)(uint64_t n, const uint8_t *recs, const uint64_t *roff, const uint8_t *secret, uint64_t sn,
+                       uint8_t **words, uint64_t *woff, void *user));
+
 /* ---- leaves: the binaries and the grid ---- */
 
 /// A binary crosses the boundary: `n` raw bytes registered as a carrier of byte cells (min width, one bulk copy).

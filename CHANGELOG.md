@@ -2,6 +2,13 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.26.0
+
+The owner: "depending on what is available on device, it's basically a configuration. if gpu network is available we use this, whatever. we do this for all gpus. we have cpu stuff and do everything for gpu as well."
+
+`slate_dag_codec_names(b, encode_many)`: a grid of records named at once through the same door (the C face of
+`Codec::encode_many`); `slate_dag_codec` clears it.
+
 ## 0.25.0
 
 `slate_dag_codec_many(b, put_many, get_many)`: the store's batches beside the three callbacks `slate_dag_codec` sets

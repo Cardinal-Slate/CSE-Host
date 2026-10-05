@@ -424,6 +424,7 @@ extern "C" const char *slate_dag_codec(SlateDag *b,
   Slate::Codec &c = b->arena.env().codec;
   c.encode = encode; c.decode = decode; c.put = put;
   c.put_many = nullptr; c.get_many = nullptr;          /* a batch belongs to the put and decode it was set beside */
+  c.encode_many = nullptr;                             /* and a grid's naming to the encode */
   c.secret = sn ? std::make_shared<const Slate::WBuffer>(Slate::bytes_buffer(secret, (size_t)sn)) : nullptr;
   c.user = user;
   return nullptr;
@@ -434,6 +435,12 @@ extern "C" const char *slate_dag_codec_many(SlateDag *b,
   if (!b) return "args";
   Slate::Codec &c = b->arena.env().codec;
   c.put_many = put_many; c.get_many = get_many;
+  return nullptr;
+}
+extern "C" const char *slate_dag_codec_names(SlateDag *b,
+    int (*encode_many)(uint64_t, const uint8_t *, const uint64_t *, const uint8_t *, uint64_t, uint8_t **, uint64_t *, void *)) {
+  if (!b) return "args";
+  b->arena.env().codec.encode_many = encode_many;
   return nullptr;
 }
 extern "C" const char *slate_dag_effect_host_io(SlateDag *b,
