@@ -183,7 +183,8 @@ const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uint64_t wn, u
 /// through this container's codec — its secret, so a name only a holder of the secret can spell. A unit keeps its
 /// entry's settings this way, one row a name, the scope the entry's word, under the config secret (seam/slate_seed.c):
 /// a packet reads the one value it needs, not the entry. 0 kept; slate_dag_named_read: NULL with *bytes (malloc'd;
-/// free()) and *n, "args" when nothing is kept under the name, "partial" when a cell is on some carriers and not all.
+/// free()) and *n, "args" when nothing is kept under the name, "partial" when a cell is on some carriers and not all,
+/// "entry" when the kept leaf has no valid named-value prefix.
 int slate_dag_named_put(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn,
                         const uint8_t *bytes, uint64_t n);
 const char *slate_dag_named_read(SlateDag *b, const uint8_t *scope, uint64_t sn, const uint8_t *name, uint64_t nn,

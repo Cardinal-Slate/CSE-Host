@@ -994,8 +994,9 @@ extern "C" const char *slate_dag_named_read(SlateDag *b, const uint8_t *scope, u
   *bytes = nullptr; *n = 0;
   const Slate::Word key = named_key(b, scope, sn, name, nn);
   std::vector<uint8_t> out; bool partial = false;
-  if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, key, out, partial) || out.empty() || out[0] != 1)
+  if (!Slate::leaf_get(b->arena.store_env(), b->arena.env().codec, key, out, partial))
     return partial ? "partial" : "args";
+  if (out.empty() || out[0] != 1) return "entry";
   uint8_t *o = (uint8_t *)std::malloc(out.size() > 1 ? out.size() - 1 : 1);
   if (!o) return "internal";
   if (out.size() > 1) std::memcpy(o, out.data() + 1, out.size() - 1);
