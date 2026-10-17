@@ -129,6 +129,16 @@ uint32_t slate_dag_carrier(SlateDag *b, const int64_t *vals, uint64_t n);
 /// builder/nums). Mixing rational and plain int64 carriers in one build is not supported.
 uint32_t slate_dag_carrier_q(SlateDag *b, const int64_t *nums, uint64_t n, int64_t den, int32_t hbits);
 
+/// Use an existing result as an operand, sharing its buffer and carrying its frame and identity.
+/// The result may outlive its original builder and may be freed after registration. Refused results
+/// cannot become operands. Returns UINT32_MAX on refusal; no narrowing or reconstruction occurs.
+uint32_t slate_dag_carrier_array(SlateDag *b, const SlateArray *result);
+
+/// Read an existing result's cell rows by its whole reading word (slate_array_word), through this
+/// builder's codec. All `cells` must be present. Returns an owned result, or NULL on a miss/refusal.
+/// This restores the stored plane's frame; application-specific receipts remain separate stored data.
+SlateArray *slate_array_read(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t cells);
+
 /// Swap carrier `cid`'s bytes in place, then re-run the same construction over the new source — no rebuild, no
 /// recompile (the compiled leaf is carrier-independent). Returns NULL or "args".
 const char *slate_dag_carrier_set_bytes(SlateDag *b, uint32_t cid, const uint8_t *bytes, uint64_t n);

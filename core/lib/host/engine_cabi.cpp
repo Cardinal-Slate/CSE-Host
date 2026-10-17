@@ -641,6 +641,23 @@ extern "C" int32_t slate_dag_load(SlateDag *b, uint32_t cid, int32_t idx) try {
   return b->build.load(cid, idx);
 } catch (...) { if (b) b->err = true; return -1; }
 
+extern "C" uint32_t slate_dag_carrier_array(SlateDag *b, const SlateArray *result) try {
+  if (!b || b->err || !result || !result->ar.buffer() || !result->ar.frame().has_value()) return UINT32_MAX;
+  return b->build.carrier(result->ar);
+} catch (...) { if (b) b->err = true; return UINT32_MAX; }
+
+extern "C" SlateArray *slate_array_read(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t cells) try {
+  if (!b || b->err || !word || !wn || !cells || cells > SIZE_MAX) return nullptr;
+  Slate::CellsRead r;
+  const auto &env = b->arena.store_env();
+  if (!Slate::cells_read(env, b->arena.env().codec, Slate::Word(word,word+wn), (size_t)cells, r, true) || !r.hit || r.plane.size()!=cells) return nullptr;
+  auto plane=std::make_shared<const Slate::WBuffer>(std::move(r.plane));
+  auto result=std::make_unique<SlateArray>();
+  result->ar=Slate::ArrayReading{Slate::DagBuild::array_frame(*plane),plane,Slate::bytes_buffer(word,(size_t)wn)};
+  result->codec=b->arena.env().codec;
+  return result.release();
+} catch (...) { return nullptr; }
+
 extern "C" int32_t slate_dag_add(SlateDag *b, int32_t x, int32_t y) try {
   if (!sd_node_ok(b, x) || !sd_node_ok(b, y)) { if (b) b->err = true; return -1; }
   return b->build.add(x, y);
