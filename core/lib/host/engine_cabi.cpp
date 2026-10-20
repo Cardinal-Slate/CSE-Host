@@ -1037,6 +1037,20 @@ extern "C" const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uin
   *bytes = o; *n = (uint64_t)out.size();
   return nullptr;
 } catch (...) { return "internal"; }
+extern "C" const char *slate_dag_leaf_read_upto(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t upto, uint8_t **bytes,
+                                                uint64_t *n) try {
+  if (!b || !word || !wn || !bytes || !n || !upto) return "args";
+  *bytes = nullptr; *n = 0;
+  std::vector<uint8_t> out;
+  bool partial = false;
+  if (!Slate::leaf_get_upto(b->arena.store_env(), b->arena.env().codec, Slate::Word(word, word + wn), (size_t)upto, out, partial))
+    return partial ? "partial" : "args";
+  uint8_t *o = (uint8_t *)std::malloc(out.size() ? out.size() : 1);
+  if (!o) return "internal";
+  if (!out.empty()) std::memcpy(o, out.data(), out.size());
+  *bytes = o; *n = (uint64_t)out.size();
+  return nullptr;
+} catch (...) { return "internal"; }
 
 /* A taken ask's root, asked before its inputs are read: the program spliced into a tick of its own, each input a
    carrier named by its leaf's word (as run_ticks names it) holding nothing yet — a step's word is a record over its

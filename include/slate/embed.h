@@ -174,6 +174,11 @@ int slate_dag_leaf_whole(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t
 /// first cell nobody has. `*bytes` is malloc'd (the caller frees it with free()).
 /// @return NULL; "args" when nothing is under the word; "partial" when a cell is on some carriers but not all.
 const char *slate_dag_leaf_read(SlateDag *b, const uint8_t *word, uint64_t wn, uint8_t **bytes, uint64_t *n);
+/// slate_dag_leaf_read for the leaf's first `upto` bytes (all of it when it is shorter): only the cells that carry
+/// them are read (CSE-Arena leaf_get_upto). For a reader whose leaf says its length in its first bytes — a machine-code
+/// program's header — so its walk asks for the header's cells and then for the cells its length names, and none past.
+const char *slate_dag_leaf_read_upto(SlateDag *b, const uint8_t *word, uint64_t wn, uint64_t upto, uint8_t **bytes,
+                                     uint64_t *n);
 
 
 /// Bytes kept under a name in a scope, and read back: a leaf, [1][bytes] (so a value of no bytes is a leaf too), under

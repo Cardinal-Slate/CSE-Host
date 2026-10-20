@@ -2,6 +2,15 @@
 
 Semantic versions (`MAJOR.MINOR.PATCH`). Pre-1.0, a MINOR release may change API; a PATCH release is fixes only.
 
+## 0.28.0
+
+- `slate_dag_leaf_read_upto(b, word, wn, upto, &bytes, &n)`: `slate_dag_leaf_read` for a leaf's first `upto` bytes (all
+  of it when it is shorter), only the cells that carry them read (CSE-Arena 0.29.0 `leaf_get_upto`). For a reader whose
+  leaf says its length in its first bytes: CSE-Core's runner reads a machine-code program's header, then the code to
+  the length the header says.
+- Released with what came after 0.27.0 untagged: store-backed implementation read/write selection and the mul31
+  caller (3d60b2b), and the existing stored readings and result operands exposed through the C ABI (bd81137).
+
 ## 0.27.0
 
 The owner: "what a machine has is configuration"; "seams only for hardware and wires"; the engine is arithmetic over rows, its floor the language runtime and threads.
